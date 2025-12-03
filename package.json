@@ -1,0 +1,12 @@
+{
+  "name": "serocop-webr-app",
+  "version": "1.0.0",
+  "description": "WebR application for SeroCOP package",
+  "scripts": {
+    "start": "python -m http.server 8000",
+    "serve": "npx http-server -p 8000"
+  },
+  "keywords": ["webr", "serocop", "bayesian", "correlates-of-protection"],
+  "author": "David Hodgson",
+  "license": "MIT"
+}

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeroCOP WebR Application</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/webr@0.4.2/dist/webr.mjs" type="module"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SeroCOP: Correlates of Protection Analysis</h1>
+            <p class="subtitle">Bayesian analysis of antibody titres and infection outcomes using webR</p>
+        </header>
+
+        <div id="loading-screen" class="loading-screen">
+            <div class="spinner"></div>
+            <p>Initializing WebR environment...</p>
+            <p class="loading-detail">This may take a minute on first load</p>
+        </div>
+
+        <main id="main-content" style="display: none;">
+            <section class="card">
+                <h2>1. Upload Your Data</h2>
+                <p class="help-text">
+                    Upload a CSV file with columns: <code>titre</code> (antibody levels) and 
+                    <code>infected</code> (0 or 1). Optional: <code>group</code> for hierarchical modeling.
+                </p>
+                
+                <div class="upload-area">
+                    <input type="file" id="file-input" accept=".csv" />
+                    <button id="load-example" class="btn btn-secondary">Load Single Biomarker</button>
+                    <button id="load-multi-example" class="btn btn-secondary">Load Multi-Biomarker</button>
+                </div>
+
+                <div id="data-preview" class="data-preview" style="display: none;">
+                    <h3>Data Preview</h3>
+                    <div id="data-summary"></div>
+                    <div id="data-table"></div>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>2. Model Configuration</h2>
+                
+                <div class="form-group">
+                    <label for="model-type">Model Type:</label>
+                    <select id="model-type">
+                        <option value="single">Single Biomarker</option>
+                        <option value="multi">Multiple Biomarkers</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="hierarchical-check" />
+                        Include hierarchical (group) effects
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label for="chains">MCMC Chains:</label>
+                    <input type="number" id="chains" value="2" min="1" max="4" />
+                </div>
+
+                <div class="form-group">
+                    <label for="iter">Iterations per chain:</label>
+                    <input type="number" id="iter" value="1000" min="500" max="4000" step="500" />
+                </div>
+
+                <button id="fit-model" class="btn btn-primary" disabled>Fit Model</button>
+            </section>
+
+            <section class="card">
+                <h2>3. Model Fitting Status</h2>
+                <div id="fitting-status" class="status-area">
+                    <p>Upload data and click "Fit Model" to begin</p>
+                </div>
+                <div id="console-output" class="console-output"></div>
+            </section>
+
+            <section class="card">
+                <h2>4. Results</h2>
+                
+                <div id="results-area" style="display: none;">
+                    <div class="tabs">
+                        <button class="tab-btn active" data-tab="posteriors">Posteriors</button>
+                        <button class="tab-btn" data-tab="curve">Protection Curve</button>
+                        <button class="tab-btn" data-tab="roc">ROC Curve</button>
+                        <button class="tab-btn" data-tab="metrics">Metrics</button>
+                    </div>
+
+                    <div class="tab-content">
+                        <div id="tab-posteriors" class="tab-pane active">
+                            <h3>Posterior Distributions</h3>
+                            <div id="posterior-plots"></div>
+                        </div>
+
+                        <div id="tab-curve" class="tab-pane">
+                            <h3>Protection Curve</h3>
+                            <div id="curve-plot"></div>
+                        </div>
+
+                        <div id="tab-roc" class="tab-pane">
+                            <h3>ROC Curve</h3>
+                            <div id="roc-plot"></div>
+                        </div>
+
+                        <div id="tab-metrics" class="tab-pane">
+                            <h3>Model Performance Metrics</h3>
+                            <div id="metrics-table"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="no-results" class="empty-state">
+                    <p>No results yet. Fit a model to see outputs.</p>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Powered by <a href="https://docs.r-wasm.org/webr/" target="_blank">webR</a> | 
+               <a href="https://github.com/seroanalytics/seroCOP" target="_blank">seroCOP Package</a></p>
+        </footer>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
