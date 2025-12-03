@@ -1,0 +1,8 @@
+{
+  "buildCommand": "bash vercel-build.sh",
+  "outputDirectory": ".",
+  "framework": null,
+  "env": {
+    "API_URL": "@api_url"
+  }
+}
