@@ -281,6 +281,12 @@ header h1 {
     cursor: not-allowed;
 }
 
+.button-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
 /* Status Area */
 .status-area {
     padding: 24px;

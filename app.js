@@ -6,6 +6,8 @@ class SeroCOPApp {
         this.currentData = null;
         this.model = null;
         this.init();
+        // API URL - update this after deploying seroCOP-api
+        this.apiBaseUrl = process.env.API_URL || 'https://YOUR-API-URL-HERE.railway.app';
     }
 
     async init() {
@@ -104,6 +106,17 @@ class SeroCOPApp {
         
         // Fit model button
         document.getElementById('fit-model').addEventListener('click', () => this.fitModel());
+            const fitServerBtn = document.getElementById('fitServerBtn');
+            if (fitServerBtn) {
+                fitServerBtn.addEventListener('click', () => this.fitOnServer());
+                // Enable when data is loaded similar to fit-model
+                const enableButtons = () => {
+                    document.getElementById('fit-model').disabled = false;
+                    fitServerBtn.disabled = false;
+                };
+                // Hook where current code enables fit-model; call enableButtons after data load
+                this.enableFitButtons = enableButtons;
+            }
         
         // Tab switching
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -126,6 +139,9 @@ class SeroCOPApp {
     async loadDataFromCSV(csvText) {
         try {
             this.log('Loading data...');
+            
+            // Store CSV for server upload
+            this.currentDataCsv = csvText;
             
             // Upload CSV to webR
             await this.webR.FS.writeFile('/data.csv', csvText);
@@ -197,6 +213,7 @@ class SeroCOPApp {
             this.currentData = summary;
             
             this.displayDataSummary(summary);
+                if (this.enableFitButtons) this.enableFitButtons();
             document.getElementById('fit-model').disabled = false;
             this.log('Data loaded successfully');
             
@@ -373,7 +390,106 @@ class SeroCOPApp {
         }
     }
 
-    async fitSingleBiomarker(useHierarchical, chains, iter) {
+        async fitOnServer() {
+            try {
+                this.log('Sending data to server for brms/Stan fit...');
+                if (!this.currentDataCsv) throw new Error('No dataset loaded. Upload a CSV or load example.');
+                
+                document.getElementById('fit-model').disabled = true;
+                document.getElementById('fitServerBtn').disabled = true;
+                document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Fitting model on server... This may take several minutes.</p>';
+                
+                const fd = new FormData();
+                const blob = new Blob([this.currentDataCsv], { type: 'text/csv' });
+                fd.append('csv', blob, 'data.csv');
+                fd.append('infected_col', 'infected');
+                fd.append('chains', '2');
+                fd.append('iter', '1000');
+
+                const resp = await fetch(`${this.apiBaseUrl}/fit`, { method: 'POST', body: fd });
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(`Server error (${resp.status}): ${text}`);
+                }
+                const result = await resp.json();
+                this.log('Server fit complete. Rendering results...');
+                this.renderServerResults(result);
+                document.getElementById('fitting-status').innerHTML = '<p class="success">✓ Model fitted successfully (server)</p>';
+                this.log('Done.');
+            } catch (err) {
+                this.logError('Error with server fit: ' + err.message);
+                document.getElementById('fitting-status').innerHTML = '<p class="error">✗ Fit failed: ' + err.message + '</p>';
+            } finally {
+                document.getElementById('fit-model').disabled = false;
+                document.getElementById('fitServerBtn').disabled = false;
+            }
+        }
+
+    renderServerResults(result) {
+        // Show results area
+        document.getElementById('results-area').style.display = 'block';
+        document.getElementById('no-results').style.display = 'none';
+        
+        const metricsEl = document.getElementById('metrics-table');
+        const meta = result.meta || {};
+        const auc = meta.auc != null ? Number(meta.auc).toFixed(3) : 'NA';
+        const n = meta.n || 'NA';
+        const chains = meta.chains || 'NA';
+        const iter = meta.iter || 'NA';
+        const titreCol = meta.titre_col || 'biomarker';
+        let looHtml = '';
+        if (meta.loo && meta.loo.elpd != null) {
+            looHtml = `<tr><td>ELPD-LOO</td><td>${Number(meta.loo.elpd).toFixed(2)}</td></tr>` +
+                      `<tr><td>p_LOO</td><td>${Number(meta.loo.p_loo).toFixed(2)}</td></tr>`;
+        }
+        metricsEl.innerHTML = `
+            <table class="metrics-table">
+                <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>Sample Size</td><td>${n}</td></tr>
+                <tr><td>Biomarker</td><td>${titreCol}</td></tr>
+                <tr><td>Chains</td><td>${chains}</td></tr>
+                <tr><td>Iterations</td><td>${iter}</td></tr>
+                <tr><td>AUC</td><td>${auc}</td></tr>
+                ${looHtml}
+            </table>
+            <p class="note">Results from server-side brms/Stan fitting</p>
+        `;
+
+        const curveEl = document.getElementById('curve-plot');
+        curveEl.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = result.protection_curve_plot;
+        img.alt = 'Protection Curve (server)';
+        img.style.maxWidth = '100%';
+        img.style.borderRadius = '4px';
+        curveEl.appendChild(img);
+
+        const rocEl = document.getElementById('roc-plot');
+        rocEl.innerHTML = `<p class="note">ROC curve not returned by API. AUC: ${auc}</p>`;
+
+        const postEl = document.getElementById('posterior-plots');
+        postEl.innerHTML = '';
+        if (Array.isArray(result.posterior_draws) && result.posterior_draws.length > 0) {
+            const keys = Object.keys(result.posterior_draws[0] || {});
+            const numericKeys = keys.filter(k => typeof result.posterior_draws[0][k] === 'number');
+            if (numericKeys.length > 0) {
+                numericKeys.slice(0, 4).forEach(key => {
+                    const values = result.posterior_draws.map(d => Number(d[key])).filter(v => Number.isFinite(v));
+                    if (values.length > 0) {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 600; canvas.height = 300;
+                        canvas.style.marginBottom = '20px';
+                        postEl.appendChild(canvas);
+                        this.plotHistogram(canvas, values, key);
+                    }
+                });
+            } else {
+                postEl.innerHTML = '<p>Posterior draws received but no numeric parameters found.</p>';
+            }
+        } else {
+            postEl.innerHTML = '<p>No posterior draws in server response.</p>';
+        }
+    }    async fitSingleBiomarker(useHierarchical, chains, iter) {
         await this.webR.evalR(`
             data <- read.csv('/data.csv')
             
