@@ -6,8 +6,8 @@ class SeroCOPApp {
         this.currentData = null;
         this.model = null;
         this.init();
-        // API URL - update this after deploying seroCOP-api
-        this.apiBaseUrl = process.env.API_URL || 'https://YOUR-API-URL-HERE.railway.app';
+        // API URL - Railway deployment
+        this.apiBaseUrl = 'https://serocop-production.up.railway.app';
     }
 
     async init() {
