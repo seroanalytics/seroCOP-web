@@ -390,42 +390,45 @@ class SeroCOPApp {
         }
     }
 
-        async fitOnServer() {
-            try {
-                this.log('Sending data to server for brms/Stan fit...');
-                if (!this.currentDataCsv) throw new Error('No dataset loaded. Upload a CSV or load example.');
-                
-                document.getElementById('fit-model').disabled = true;
-                document.getElementById('fitServerBtn').disabled = true;
-                document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Fitting model on server... This may take several minutes.</p>';
-                
-                const fd = new FormData();
-                const blob = new Blob([this.currentDataCsv], { type: 'text/csv' });
-                fd.append('csv', blob, 'data.csv');
-                fd.append('infected_col', 'infected');
-                fd.append('chains', '2');
-                fd.append('iter', '1000');
+    async fitOnServer() {
+        try {
+            this.log('Sending data to server for brms/Stan fit...');
+            if (!this.currentDataCsv) throw new Error('No dataset loaded. Upload a CSV or load example.');
+            
+            document.getElementById('fit-model').disabled = true;
+            document.getElementById('fitServerBtn').disabled = true;
+            document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Fitting model on server... This may take several minutes.</p>';
+            
+            // Send CSV as JSON with parameters
+            const payload = {
+                csv_text: this.currentDataCsv,
+                infected_col: 'infected',
+                chains: 2,
+                iter: 1000
+            };
 
-                const resp = await fetch(`${this.apiBaseUrl}/fit`, { method: 'POST', body: fd });
-                if (!resp.ok) {
-                    const text = await resp.text();
-                    throw new Error(`Server error (${resp.status}): ${text}`);
-                }
-                const result = await resp.json();
-                this.log('Server fit complete. Rendering results...');
-                this.renderServerResults(result);
-                document.getElementById('fitting-status').innerHTML = '<p class="success">✓ Model fitted successfully (server)</p>';
-                this.log('Done.');
-            } catch (err) {
-                this.logError('Error with server fit: ' + err.message);
-                document.getElementById('fitting-status').innerHTML = '<p class="error">✗ Fit failed: ' + err.message + '</p>';
-            } finally {
-                document.getElementById('fit-model').disabled = false;
-                document.getElementById('fitServerBtn').disabled = false;
+            const resp = await fetch(`${this.apiBaseUrl}/fit`, { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`Server error (${resp.status}): ${text}`);
             }
+            const result = await resp.json();
+            this.log('Server fit complete. Rendering results...');
+            this.renderServerResults(result);
+            document.getElementById('fitting-status').innerHTML = '<p class="success">✓ Model fitted successfully (server)</p>';
+            this.log('Done.');
+        } catch (err) {
+            this.logError('Error with server fit: ' + err.message);
+            document.getElementById('fitting-status').innerHTML = '<p class="error">✗ Fit failed: ' + err.message + '</p>';
+        } finally {
+            document.getElementById('fit-model').disabled = false;
+            document.getElementById('fitServerBtn').disabled = false;
         }
-
-    renderServerResults(result) {
+    }    renderServerResults(result) {
         // Show results area
         document.getElementById('results-area').style.display = 'block';
         document.getElementById('no-results').style.display = 'none';
