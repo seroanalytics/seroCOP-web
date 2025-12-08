@@ -397,6 +397,24 @@ class SeroCOPApp {
             
             document.getElementById('fit-model').disabled = true;
             document.getElementById('fitServerBtn').disabled = true;
+            document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Connecting to server...</p>';
+            
+            // First, ping the health endpoint to wake up the server (Render free tier spins down)
+            this.log('Waking up server (this may take 30-60 seconds on first request)...');
+            try {
+                const healthResp = await fetch(`${this.apiBaseUrl}/health`, { 
+                    method: 'GET'
+                });
+                if (healthResp.ok) {
+                    const health = await healthResp.json();
+                    this.log(`Server ready (seroCOP v${health.package})`);
+                } else {
+                    this.log('Server responded but health check failed. Continuing anyway...');
+                }
+            } catch (healthErr) {
+                this.log('Health check failed: ' + healthErr.message + '. Proceeding with fit request...');
+            }
+            
             document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Fitting model on server... This may take several minutes.</p>';
             
             // Send CSV as JSON with parameters
@@ -407,15 +425,23 @@ class SeroCOPApp {
                 iter: 1000
             };
 
+            this.log('Sending fit request to server...');
             const resp = await fetch(`${this.apiBaseUrl}/fit`, { 
                 method: 'POST', 
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(payload),
+                keepalive: true
             });
+            
             if (!resp.ok) {
                 const text = await resp.text();
                 throw new Error(`Server error (${resp.status}): ${text}`);
             }
+            
+            this.log('Parsing server response...');
             const result = await resp.json();
             this.log('Server fit complete. Rendering results...');
             this.renderServerResults(result);
@@ -423,6 +449,9 @@ class SeroCOPApp {
             this.log('Done.');
         } catch (err) {
             this.logError('Error with server fit: ' + err.message);
+            if (err.message.includes('Failed to fetch')) {
+                this.logError('Network error - this may be due to the server taking too long to respond or the browser suspending the connection. Try keeping this tab active during fitting.');
+            }
             document.getElementById('fitting-status').innerHTML = '<p class="error">✗ Fit failed: ' + err.message + '</p>';
         } finally {
             document.getElementById('fit-model').disabled = false;
