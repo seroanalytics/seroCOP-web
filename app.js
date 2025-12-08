@@ -395,6 +395,9 @@ class SeroCOPApp {
             this.log('Sending data to server for brms/Stan fit...');
             if (!this.currentDataCsv) throw new Error('No dataset loaded. Upload a CSV or load example.');
             
+            // Log what we're about to send
+            this.log('CSV preview (first 300 chars): ' + this.currentDataCsv.substring(0, 300));
+            
             document.getElementById('fit-model').disabled = true;
             document.getElementById('fitServerBtn').disabled = true;
             document.getElementById('fitting-status').innerHTML = '<div class="spinner-small"></div><p>Connecting to server...</p>';
