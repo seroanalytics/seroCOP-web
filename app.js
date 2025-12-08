@@ -395,8 +395,19 @@ class SeroCOPApp {
             this.log('Sending data to server for brms/Stan fit...');
             if (!this.currentDataCsv) throw new Error('No dataset loaded. Upload a CSV or load example.');
             
+            // Convert to string if it's not already
+            let csvText = this.currentDataCsv;
+            if (typeof csvText !== 'string') {
+                // If it's a Uint8Array or similar, convert to string
+                if (csvText instanceof Uint8Array) {
+                    csvText = new TextDecoder().decode(csvText);
+                } else {
+                    csvText = String(csvText);
+                }
+            }
+            
             // Log what we're about to send
-            this.log('CSV preview (first 300 chars): ' + this.currentDataCsv.substring(0, 300));
+            this.log('CSV preview (first 300 chars): ' + csvText.substring(0, 300));
             
             document.getElementById('fit-model').disabled = true;
             document.getElementById('fitServerBtn').disabled = true;
@@ -422,7 +433,7 @@ class SeroCOPApp {
             
             // Send CSV as JSON with parameters
             const payload = {
-                csv_text: this.currentDataCsv,
+                csv_text: csvText,
                 infected_col: 'infected',
                 chains: 2,
                 iter: 1000
