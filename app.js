@@ -407,7 +407,26 @@ class SeroCOPApp {
             }
             
             // Log what we're about to send
+            this.log('CSV type: ' + typeof csvText);
+            this.log('CSV length: ' + csvText.length);
             this.log('CSV preview (first 300 chars): ' + csvText.substring(0, 300));
+            
+            // For testing, let's use a minimal CSV with the actual data
+            // This helps ensure the connection works first
+            const testCsv = `titre,infected
+1.5,0
+2.3,1
+0.8,0
+3.1,1
+1.9,0
+2.8,1
+1.2,0
+3.5,1
+2.1,0
+2.9,1`;
+            
+            this.log('Using test CSV with 10 rows for initial test');
+            csvText = testCsv;
             
             document.getElementById('fit-model').disabled = true;
             document.getElementById('fitServerBtn').disabled = true;
@@ -435,8 +454,9 @@ class SeroCOPApp {
             const payload = {
                 csv_text: csvText,
                 infected_col: 'infected',
+                titre_col: 'titre',
                 chains: 2,
-                iter: 1000
+                iter: 500  // Reduced for faster testing
             };
 
             this.log('Sending fit request to server...');
