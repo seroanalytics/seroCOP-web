@@ -3,15 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SeroCOP WebR Application</title>
+    <title>SeroCOP Browser Application</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='75' font-size='80' font-family='Avenir,sans-serif' font-weight='bold' fill='%23e74c3c'>S</text></svg>">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/webr@0.4.2/dist/webr.mjs" type="module"></script>
+    <script src="parallel_tempering_mcmc.js"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>SeroCOP: Correlates of Protection Analysis</h1>
-            <p class="subtitle">Bayesian analysis of antibody titres and infection outcomes using webR</p>
+            <h1>seroCOP: Correlates of Protection analysis</h1>
+            <img src="logo.png" alt="seroCOP Logo" class="logo">
+            <p class="subtitle">Bayesian analysis of antibody titres and infection outcomes</p>
         </header>
 
         <div id="loading-screen" class="loading-screen">
@@ -52,12 +54,13 @@
                     </select>
                 </div>
 
-                <div class="form-group">
+                <!-- Hierarchical effects: code preserved for future use -->
+                <!-- <div class="form-group">
                     <label>
                         <input type="checkbox" id="hierarchical-check" />
                         Include hierarchical (group) effects
                     </label>
-                </div>
+                </div> -->
 
                 <div class="form-group">
                     <label for="chains">MCMC Chains:</label>
@@ -66,12 +69,13 @@
 
                 <div class="form-group">
                     <label for="iter">Iterations per chain:</label>
-                    <input type="number" id="iter" value="1000" min="500" max="4000" step="500" />
+                    <input type="number" id="iter" value="10000" min="1000" max="50000" step="1000" />
                 </div>
 
                 <div class="button-row">
-                    <button id="fit-model" class="btn btn-primary" disabled>Fit (Browser)</button>
-                    <button id="fitServerBtn" class="btn btn-secondary" disabled>Fit on Server</button>
+                    <button id="fit-model" class="btn btn-primary" disabled>Fit Model in Browser</button>
+                    <!-- Server fitting disabled: using browser MCMC instead -->
+                    <!-- <button id="fitServerBtn" class="btn btn-secondary" disabled>Fit on Server</button> -->
                 </div>
             </section>
 
@@ -92,6 +96,7 @@
                         <button class="tab-btn" data-tab="curve">Protection Curve</button>
                         <button class="tab-btn" data-tab="roc">ROC Curve</button>
                         <button class="tab-btn" data-tab="metrics">Metrics</button>
+                        <button class="tab-btn" data-tab="comparison">Model Comparison</button>
                     </div>
 
                     <div class="tab-content">
@@ -113,6 +118,11 @@
                         <div id="tab-metrics" class="tab-pane">
                             <h3>Model Performance Metrics</h3>
                             <div id="metrics-table"></div>
+                        </div>
+
+                        <div id="tab-comparison" class="tab-pane">
+                            <h3>Model Comparison</h3>
+                            <div id="comparison-plot"></div>
                         </div>
                     </div>
                 </div>

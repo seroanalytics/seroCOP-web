@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCMC Module Test & Validation</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1, h2 { color: #333; }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover { background: #0052a3; }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        pre {
+            background: #f8f8f8;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            border-left: 4px solid #0066cc;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .status.info { background: #e3f2fd; color: #01579b; }
+        .status.success { background: #e8f5e9; color: #1b5e20; }
+        .status.warning { background: #fff3e0; color: #e65100; }
+        .status.error { background: #ffebee; color: #c62828; }
+        .metric {
+            display: inline-block;
+            background: #f0f0f0;
+            padding: 8px 12px;
+            margin: 5px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .metric.good { background: #c8e6c9; }
+        .metric.warning { background: #ffe0b2; }
+        .metric.bad { background: #ffcdd2; }
+        canvas {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔬 Parallel Tempering MCMC - Test & Validation</h1>
+    
+    <div class="container">
+        <h2>1. Module Loading</h2>
+        <div id="loading-status" class="status info">Loading WebAssembly module...</div>
+        <button id="reload-btn" onclick="location.reload()" style="display:none;">Reload</button>
+    </div>
+
+    <div class="container" id="test-container" style="display:none;">
+        <h2>2. Run Test</h2>
+        <p>Generate synthetic data and fit the 4-parameter logistic model using parallel tempering MCMC.</p>
+        
+        <label>
+            Sample size: <input type="number" id="sample-size" value="200" min="50" max="1000" step="50">
+        </label>
+        <label>
+            Iterations: <input type="number" id="iterations" value="10000" min="1000" max="50000" step="1000">
+        </label>
+        <label>
+            Warmup: <input type="number" id="warmup" value="5000" min="500" max="25000" step="500">
+        </label>
+        <br>
+        <button id="run-test-btn">Run MCMC Fit</button>
+        <button id="compare-stan-btn" style="display:none;">Compare with Stan</button>
+        
+        <div id="test-status"></div>
+    </div>
+
+    <div class="container" id="results-container" style="display:none;">
+        <h2>3. Results</h2>
+        
+        <h3>True vs Estimated Parameters</h3>
+        <pre id="parameter-comparison"></pre>
+        
+        <h3>Convergence Diagnostics</h3>
+        <div id="convergence-metrics"></div>
+        
+        <h3>Algorithm Performance</h3>
+        <pre id="performance-metrics"></pre>
+        
+        <h3>Trace Plots</h3>
+        <div id="trace-plots">
+            <canvas id="trace-floor" width="600" height="200"></canvas>
+            <canvas id="trace-ceiling" width="600" height="200"></canvas>
+            <canvas id="trace-ec50" width="600" height="200"></canvas>
+            <canvas id="trace-slope" width="600" height="200"></canvas>
+        </div>
+        
+        <h3>Posterior Distributions</h3>
+        <div id="posterior-plots">
+            <canvas id="hist-floor" width="300" height="200"></canvas>
+            <canvas id="hist-ceiling" width="300" height="200"></canvas>
+            <canvas id="hist-ec50" width="300" height="200"></canvas>
+            <canvas id="hist-slope" width="300" height="200"></canvas>
+        </div>
+        
+        <h3>Protection Curve</h3>
+        <canvas id="protection-curve" width="600" height="400"></canvas>
+    </div>
+
+    <script src="./parallel_tempering_mcmc.js"></script>
+    <script>
+        let Module;
+        let testData = {};
+        
+        // Load module
+        const loadingStatus = document.getElementById('loading-status');
+        
+        createMCMCModule().then(mod => {
+            Module = mod;
+            loadingStatus.className = 'status success';
+            loadingStatus.textContent = '✓ WebAssembly module loaded successfully!';
+            document.getElementById('test-container').style.display = 'block';
+        }).catch(error => {
+            loadingStatus.className = 'status error';
+            loadingStatus.innerHTML = `✗ Failed to load module: ${error.message}<br><small>Make sure to build the module first: <code>./build.sh</code></small>`;
+            document.getElementById('reload-btn').style.display = 'inline-block';
+            throw error;
+        });
+        
+        // Generate synthetic data
+        function generateData(n) {
+            const true_params = {
+                floor: 0.1,
+                ceiling: 0.7,
+                ec50: 2.5,
+                slope: 1.5
+            };
+            
+            const titre = [];
+            const infected = [];
+            
+            for (let i = 0; i < n; i++) {
+                const t = 0.5 + Math.random() * 4.5; // Titres between 0.5 and 5
+                titre.push(t);
+                
+                // True probability
+                const prob = true_params.ceiling * (
+                    1 / (1 + Math.exp(true_params.slope * (t - true_params.ec50))) * 
+                    (1 - true_params.floor) + true_params.floor
+                );
+                
+                infected.push(Math.random() < prob ? 1 : 0);
+            }
+            
+            return { titre, infected, true_params };
+        }
+        
+        // Run MCMC test
+        document.getElementById('run-test-btn').addEventListener('click', async () => {
+            const btn = document.getElementById('run-test-btn');
+            btn.disabled = true;
+            const testStatus = document.getElementById('test-status');
+            testStatus.innerHTML = '<div class="status info">Running MCMC...</div>';
+            
+            try {
+                const n = parseInt(document.getElementById('sample-size').value);
+                const iterations = parseInt(document.getElementById('iterations').value);
+                const warmup = parseInt(document.getElementById('warmup').value);
+                
+                // Generate data
+                testData = generateData(n);
+                testStatus.innerHTML += '<div class="status info">Generated ' + n + ' observations</div>';
+                
+                // Prepare data for C++ - create vectors manually
+                const titreVec = new Module.VectorDouble();
+                for (let i = 0; i < testData.titre.length; i++) {
+                    titreVec.push_back(testData.titre[i]);
+                }
+                
+                const infectedVec = new Module.VectorInt();
+                for (let i = 0; i < testData.infected.length; i++) {
+                    infectedVec.push_back(testData.infected[i]);
+                }
+                
+                const data = new Module.Data(titreVec, infectedVec);
+                
+                // Set priors (weakly informative)
+                const priors = {
+                    floor_alpha: 2.0,
+                    floor_beta: 10.0,
+                    ceiling_alpha: 5.0,
+                    ceiling_beta: 3.0,
+                    ec50_mean: 2.5,
+                    ec50_sd: 1.5,
+                    slope_mean: 1.0,
+                    slope_sd: 1.0
+                };
+                
+                testStatus.innerHTML += '<div class="status info">Creating sampler with 15 temperature ladders...</div>';
+                const sampler = new Module.ParallelTemperingMCMC(15, data, priors);
+                
+                testStatus.innerHTML += '<div class="status info">Running ' + iterations + ' iterations...</div>';
+                const startTime = performance.now();
+                sampler.run(iterations);
+                const endTime = performance.now();
+                const elapsed = (endTime - startTime) / 1000;
+                
+                testStatus.innerHTML += '<div class="status success">✓ Completed in ' + elapsed.toFixed(2) + ' seconds</div>';
+                
+                // Get samples
+                const samples = sampler.get_samples();
+                testData.samples = [];
+                for (let i = warmup; i < samples.size(); i++) {
+                    testData.samples.push(samples.get(i));
+                }
+                
+                // Diagnostics
+                const rhat = sampler.compute_rhat(warmup);
+                const ess = sampler.compute_ess(warmup);
+                const swap_rate = sampler.get_swap_rate();
+                const accept_rates = sampler.get_acceptance_rates();
+                
+                testData.diagnostics = {
+                    rhat: {
+                        floor: rhat.get(0),
+                        ceiling: rhat.get(1),
+                        ec50: rhat.get(2),
+                        slope: rhat.get(3)
+                    },
+                    ess: {
+                        floor: ess.get(0),
+                        ceiling: ess.get(1),
+                        ec50: ess.get(2),
+                        slope: ess.get(3)
+                    },
+                    swap_rate: swap_rate,
+                    accept_rates: Array.from({length: accept_rates.size()}, (_, i) => accept_rates.get(i)),
+                    elapsed: elapsed,
+                    iterations: iterations,
+                    warmup: warmup
+                };
+                
+                // Display results
+                displayResults();
+                
+            } catch (error) {
+                testStatus.innerHTML += '<div class="status error">✗ Error: ' + error.message + '</div>';
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+            }
+        });
+        
+        // Display results
+        function displayResults() {
+            document.getElementById('results-container').style.display = 'block';
+            
+            // Compute posterior means and quantiles
+            const params = ['floor', 'ceiling', 'ec50', 'slope'];
+            const posteriors = {};
+            
+            params.forEach(p => {
+                const values = testData.samples.map(s => s[p]).sort((a, b) => a - b);
+                const mean = values.reduce((a, b) => a + b) / values.length;
+                const q025 = values[Math.floor(values.length * 0.025)];
+                const q975 = values[Math.floor(values.length * 0.975)];
+                posteriors[p] = { mean, q025, q975, values };
+            });
+            
+            // Parameter comparison
+            let comparison = '';
+            params.forEach(p => {
+                const true_val = testData.true_params[p];
+                const est = posteriors[p];
+                const error = Math.abs(est.mean - true_val);
+                const rel_error = (error / true_val * 100).toFixed(1);
+                comparison += `${p.padEnd(10)} True: ${true_val.toFixed(3)}  Est: ${est.mean.toFixed(3)} [${est.q025.toFixed(3)}, ${est.q975.toFixed(3)}]  Error: ${rel_error}%\n`;
+            });
+            document.getElementById('parameter-comparison').textContent = comparison;
+            
+            // Convergence metrics
+            const diag = testData.diagnostics;
+            let metrics = '';
+            params.forEach(p => {
+                const rhat = diag.rhat[p];
+                const ess = diag.ess[p];
+                const rhat_class = rhat < 1.05 ? 'good' : (rhat < 1.1 ? 'warning' : 'bad');
+                const ess_class = ess > 400 ? 'good' : (ess > 200 ? 'warning' : 'bad');
+                metrics += `<div class="metric ${rhat_class}">R-hat(${p}): ${rhat.toFixed(3)}</div>`;
+                metrics += `<div class="metric ${ess_class}">ESS(${p}): ${ess.toFixed(0)}</div>`;
+            });
+            document.getElementById('convergence-metrics').innerHTML = metrics;
+            
+            // Performance
+            const perf = `Total iterations:     ${diag.iterations}
+Warmup (discarded):   ${diag.warmup}
+Effective samples:    ${diag.iterations - diag.warmup}
+Elapsed time:         ${diag.elapsed.toFixed(2)} seconds
+Iterations/second:    ${(diag.iterations / diag.elapsed).toFixed(0)}
+Swap acceptance:      ${(diag.swap_rate * 100).toFixed(1)}%
+Chain accept rates:   ${diag.accept_rates.map(r => (r * 100).toFixed(1) + '%').join(', ')}`;
+            document.getElementById('performance-metrics').textContent = perf;
+            
+            // Trace plots
+            params.forEach(p => {
+                plotTrace(p, posteriors[p].values);
+            });
+            
+            // Histograms
+            params.forEach(p => {
+                plotHistogram(p, posteriors[p].values, testData.true_params[p]);
+            });
+            
+            // Protection curve
+            plotProtectionCurve(posteriors);
+        }
+        
+        // Plot trace
+        function plotTrace(param, values) {
+            const canvas = document.getElementById(`trace-${param}`);
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#333';
+            ctx.font = '14px sans-serif';
+            ctx.fillText(`Trace: ${param}`, 10, 20);
+            
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            const range = max - min;
+            
+            ctx.strokeStyle = '#0066cc';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            values.forEach((v, i) => {
+                const x = (i / values.length) * (w - 40) + 20;
+                const y = h - 20 - ((v - min) / range) * (h - 40);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(20, 20);
+            ctx.lineTo(20, h - 20);
+            ctx.lineTo(w - 20, h - 20);
+            ctx.stroke();
+        }
+        
+        // Plot histogram
+        function plotHistogram(param, values, true_val) {
+            const canvas = document.getElementById(`hist-${param}`);
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#333';
+            ctx.font = '12px sans-serif';
+            ctx.fillText(param, 10, 15);
+            
+            // Compute histogram
+            const nbins = 30;
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            const range = max - min;
+            const binWidth = range / nbins;
+            const bins = new Array(nbins).fill(0);
+            
+            values.forEach(v => {
+                const bin = Math.min(Math.floor((v - min) / binWidth), nbins - 1);
+                bins[bin]++;
+            });
+            
+            const maxCount = Math.max(...bins);
+            
+            // Draw bars
+            ctx.fillStyle = '#0066cc';
+            bins.forEach((count, i) => {
+                const x = (i / nbins) * (w - 40) + 20;
+                const barW = (w - 40) / nbins;
+                const barH = (count / maxCount) * (h - 40);
+                ctx.fillRect(x, h - 20 - barH, barW - 1, barH);
+            });
+            
+            // True value line
+            if (true_val !== undefined) {
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const x = ((true_val - min) / range) * (w - 40) + 20;
+                ctx.moveTo(x, 20);
+                ctx.lineTo(x, h - 20);
+                ctx.stroke();
+            }
+            
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(20, h - 20);
+            ctx.lineTo(w - 20, h - 20);
+            ctx.stroke();
+        }
+        
+        // Plot protection curve
+        function plotProtectionCurve(posteriors) {
+            const canvas = document.getElementById('protection-curve');
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#333';
+            ctx.font = '16px sans-serif';
+            ctx.fillText('Protection Curve: P(infection | titre)', 10, 25);
+            
+            // Grid
+            const margin = 60;
+            const plotW = w - 2 * margin;
+            const plotH = h - 2 * margin;
+            
+            ctx.strokeStyle = '#e0e0e0';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 10; i++) {
+                const x = margin + (i / 10) * plotW;
+                const y = margin + (i / 10) * plotH;
+                ctx.beginPath();
+                ctx.moveTo(x, margin);
+                ctx.lineTo(x, h - margin);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(margin, y);
+                ctx.lineTo(w - margin, y);
+                ctx.stroke();
+            }
+            
+            // Axes
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(margin, margin);
+            ctx.lineTo(margin, h - margin);
+            ctx.lineTo(w - margin, h - margin);
+            ctx.stroke();
+            
+            ctx.fillStyle = '#333';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Titre', w / 2, h - 10);
+            ctx.save();
+            ctx.translate(15, h / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('P(infection)', 0, 0);
+            ctx.restore();
+            
+            // Data points
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            testData.titre.forEach((t, i) => {
+                const x = margin + (t / 5.0) * plotW;
+                const y = h - margin - testData.infected[i] * plotH;
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+            
+            // Posterior mean curve
+            const titreGrid = [];
+            for (let i = 0; i <= 100; i++) {
+                titreGrid.push(i * 5.0 / 100);
+            }
+            
+            const floor = posteriors.floor.mean;
+            const ceiling = posteriors.ceiling.mean;
+            const ec50 = posteriors.ec50.mean;
+            const slope = posteriors.slope.mean;
+            
+            ctx.strokeStyle = '#0066cc';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            titreGrid.forEach((t, i) => {
+                const prob = ceiling * (1 / (1 + Math.exp(slope * (t - ec50))) * (1 - floor) + floor);
+                const x = margin + (t / 5.0) * plotW;
+                const y = h - margin - prob * plotH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            
+            // True curve
+            const true_floor = testData.true_params.floor;
+            const true_ceiling = testData.true_params.ceiling;
+            const true_ec50 = testData.true_params.ec50;
+            const true_slope = testData.true_params.slope;
+            
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            titreGrid.forEach((t, i) => {
+                const prob = true_ceiling * (1 / (1 + Math.exp(true_slope * (t - true_ec50))) * (1 - true_floor) + true_floor);
+                const x = margin + (t / 5.0) * plotW;
+                const y = h - margin - prob * plotH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            // Legend
+            ctx.fillStyle = '#0066cc';
+            ctx.fillRect(w - 150, 50, 20, 3);
+            ctx.fillStyle = '#333';
+            ctx.fillText('Estimated', w - 120, 55);
+            
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(w - 150, 70);
+            ctx.lineTo(w - 130, 70);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#333';
+            ctx.fillText('True', w - 120, 75);
+        }
+    </script>
+</body>
+</html>

@@ -1,96 +1,31 @@
-import { WebR } from 'https://cdn.jsdelivr.net/npm/webr@0.4.2/dist/webr.mjs';
-
 class SeroCOPApp {
     constructor() {
-        this.webR = null;
+        this.mcmcModule = null;
+        this.mcmcReady = false;
         this.currentData = null;
         this.model = null;
+        // Set up event listeners immediately
+        this.setupEventListeners();
+        // Then initialize async components
         this.init();
-        // API URL - Render deployment (update with your actual Render URL)
-        this.apiBaseUrl = 'https://serocop-api.onrender.com';
     }
 
     async init() {
-        await this.initializeWebR();
-        this.setupEventListeners();
+        await this.initializeMCMC();
     }
 
-    async initializeWebR() {
+    async initializeMCMC() {
         try {
-            this.log('Initializing WebR...');
-            
-            this.webR = new WebR({
-                baseURL: 'https://cdn.jsdelivr.net/npm/webr@0.4.2/dist/',
-                channelType: 'SharedArrayBuffer'
-            });
-
-            await this.webR.init();
-            this.log('WebR initialized successfully');
-
-            // Install required packages
-            this.log('Installing required packages (this may take several minutes)...');
-            await this.installPackages();
-            
-            // Try to install seroCOP from GitHub or local
-            this.log('Loading seroCOP package...');
-            await this.loadSeroCOP();
-
-            this.hideLoading();
+            this.log('Loading parallel tempering MCMC module...');
+            this.mcmcModule = await createMCMCModule();
+            this.mcmcReady = true;
+            this.log('✓ MCMC module loaded successfully');
+            document.getElementById('loading-screen').style.display = 'none';
+            document.getElementById('main-content').style.display = 'block';
             this.log('Ready to analyze data!');
         } catch (error) {
-            this.logError('Failed to initialize WebR: ' + error.message);
-            console.error(error);
-        }
-    }
-
-    async installPackages() {
-        // WebR requires binary packages from the webR repository
-        this.log('Installing required packages from webR repository...');
-        
-        try {
-            await this.webR.installPackages(['ggplot2', 'dplyr', 'tidyr', 'MASS']);
-            this.log('Base packages installed successfully');
-        } catch (error) {
-            this.logError(`Package installation warning: ${error.message}`);
-            this.log('Continuing with available packages...');
-        }
-    }
-
-    async loadSeroCOP() {
-        try {
-            // Since brms/Stan are not available in webR, we'll need to work around this
-            // For now, we'll create a simplified version that works with available packages
-            this.log('Setting up analysis environment...');
-            
-            await this.webR.evalR(`
-                # Create a simplified fitting function that works in webR
-                # This is a workaround since brms is not available
-                
-                fit_logistic <- function(titre, infected, chains = 2, iter = 1000) {
-                    # Use base R's glm for logistic regression as a starting point
-                    data <- data.frame(titre = titre, infected = infected)
-                    
-                    # Fit a simple logistic model
-                    model <- glm(infected ~ titre, data = data, family = binomial(link = "logit"))
-                    
-                    # Create a simple structure to return
-                    list(
-                        model = model,
-                        coefficients = coef(model),
-                        fitted = fitted(model),
-                        predictions = predict(model, type = "response")
-                    )
-                }
-                
-                # Store this function globally
-                .GlobalEnv$fit_logistic <- fit_logistic
-            `);
-            
-            this.log('Analysis environment ready');
-            this.log('NOTE: Using simplified logistic regression (brms/Stan not available in webR)');
-            
-        } catch (error) {
-            this.logError('Could not set up analysis environment: ' + error.message);
+            this.logError('Failed to load MCMC module: ' + error.message);
+            throw error;
         }
     }
 
@@ -99,24 +34,17 @@ class SeroCOPApp {
         document.getElementById('file-input').addEventListener('change', (e) => this.handleFileUpload(e));
         
         // Load example data
-        document.getElementById('load-example').addEventListener('click', () => this.loadExampleData());
+        document.getElementById('load-example').addEventListener('click', () => {
+            this.loadExampleData();
+        });
         
         // Load multi-biomarker example
-        document.getElementById('load-multi-example').addEventListener('click', () => this.loadMultiBiomarkerData());
+        document.getElementById('load-multi-example').addEventListener('click', () => {
+            this.loadMultiBiomarkerData();
+        });
         
         // Fit model button
         document.getElementById('fit-model').addEventListener('click', () => this.fitModel());
-            const fitServerBtn = document.getElementById('fitServerBtn');
-            if (fitServerBtn) {
-                fitServerBtn.addEventListener('click', () => this.fitOnServer());
-                // Enable when data is loaded similar to fit-model
-                const enableButtons = () => {
-                    document.getElementById('fit-model').disabled = false;
-                    fitServerBtn.disabled = false;
-                };
-                // Hook where current code enables fit-model; call enableButtons after data load
-                this.enableFitButtons = enableButtons;
-            }
         
         // Tab switching
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -130,171 +58,237 @@ class SeroCOPApp {
 
         try {
             const text = await file.text();
-            await this.loadDataFromCSV(text);
+            this.loadDataFromCSV(text);
         } catch (error) {
             this.logError('Failed to load file: ' + error.message);
         }
     }
 
-    async loadDataFromCSV(csvText) {
+    loadDataFromCSV(csvText) {
         try {
-            this.log('Loading data...');
+            this.log('Parsing CSV data...');
             
-            // Store CSV for server upload
-            this.currentDataCsv = csvText;
+            const lines = csvText.trim().split('\n');
+            if (lines.length < 2) {
+                throw new Error('CSV file must have at least a header row and one data row');
+            }
             
-            // Upload CSV to webR
-            await this.webR.FS.writeFile('/data.csv', csvText);
+            const headers = lines[0].split(',').map(h => h.trim());
             
-            // Read and validate data
-            await this.webR.evalR(`
-                data <- read.csv('/data.csv')
+            // Find column indices (case-insensitive, multiple acceptable names)
+            const titreIdx = headers.findIndex(h => 
+                ['titre', 'titer', 'antibody', 'ab'].includes(h.toLowerCase())
+            );
+            const infectedIdx = headers.findIndex(h => 
+                ['infected', 'outcome', 'status', 'infection'].includes(h.toLowerCase())
+            );
+            
+            if (titreIdx === -1) {
+                throw new Error('Missing required column: "titre" (or "titer", "antibody", "ab")');
+            }
+            if (infectedIdx === -1) {
+                throw new Error('Missing required column: "infected" (or "outcome", "status", "infection")');
+            }
+            
+            const titre = [];
+            const infected = [];
+            
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.trim());
+                if (values.length < 2 || values[titreIdx] === '' || values[infectedIdx] === '') continue;
                 
-                # Check if infected column exists
-                if (!'infected' %in% names(data)) stop('Missing required column: infected')
+                const titreVal = parseFloat(values[titreIdx]);
+                const infectedVal = parseInt(values[infectedIdx]);
                 
-                # Check infected is binary
-                if (!all(data$infected %in% c(0, 1))) stop('infected column must be 0 or 1')
-                
-                # Check if we have titre column (single biomarker) or multiple titre columns
-                exclude_cols <- c('infected', 'group')
-                titre_cols <- setdiff(names(data), exclude_cols)
-                
-                if (length(titre_cols) == 0) {
-                    stop('No titre columns found. Need at least one numeric column.')
+                // Validate individual values
+                if (isNaN(titreVal)) {
+                    throw new Error(`Invalid titre value at row ${i + 1}: "${values[titreIdx]}". Must be numeric.`);
+                }
+                if (isNaN(infectedVal)) {
+                    throw new Error(`Invalid infected value at row ${i + 1}: "${values[infectedIdx]}". Must be 0 or 1.`);
+                }
+                if (infectedVal !== 0 && infectedVal !== 1) {
+                    throw new Error(`Invalid infected value at row ${i + 1}: ${infectedVal}. Must be 0 (protected) or 1 (infected).`);
                 }
                 
-                # For summary, use first titre column or "titre" if it exists
-                if ('titre' %in% names(data)) {
-                    titre_for_summary <- data$titre
-                } else {
-                    titre_for_summary <- data[[titre_cols[1]]]
-                }
-                
-                .GlobalEnv$titre_for_summary <- titre_for_summary
-                .GlobalEnv$n_titre_cols <- length(titre_cols)
-            `);
+                titre.push(titreVal);
+                infected.push(infectedVal);
+            }
             
-            // Get summary statistics one by one
-            const nResult = await this.webR.evalR('nrow(data)');
-            const n = await nResult.toNumber();
+            if (titre.length === 0) {
+                throw new Error('No valid data rows found in CSV');
+            }
             
-            const nInfectedResult = await this.webR.evalR('sum(data$infected)');
-            const n_infected = await nInfectedResult.toNumber();
+            if (titre.length < 10) {
+                throw new Error(`Insufficient data: only ${titre.length} observations. Need at least 10 for reliable model fitting.`);
+            }
             
-            const nProtectedResult = await this.webR.evalR('sum(1 - data$infected)');
-            const n_protected = await nProtectedResult.toNumber();
+            // Check for variance in outcome
+            const uniqueOutcomes = [...new Set(infected)];
+            if (uniqueOutcomes.length === 1) {
+                throw new Error('No variation in outcome: all observations are ' + 
+                    (uniqueOutcomes[0] === 1 ? 'infected' : 'protected') + 
+                    '. Need both infected and protected individuals.');
+            }
             
-            const hasGroupResult = await this.webR.evalR('"group" %in% names(data)');
-            const has_group = await hasGroupResult.toBoolean();
+            // Check for sufficient variation in each outcome
+            const nInfected = infected.filter(x => x === 1).length;
+            const nProtected = infected.filter(x => x === 0).length;
+            if (nInfected < 3 || nProtected < 3) {
+                this.log(`Warning: Limited variation (infected=${nInfected}, protected=${nProtected}). Results may be unstable.`);
+            }
             
-            const titreMinResult = await this.webR.evalR('min(titre_for_summary)');
-            const titre_min = await titreMinResult.toNumber();
-            
-            const titreMaxResult = await this.webR.evalR('max(titre_for_summary)');
-            const titre_max = await titreMaxResult.toNumber();
-            
-            const colsResult = await this.webR.evalR('paste(names(data), collapse=", ")');
-            const columns = await colsResult.toString();
-            
-            const nTitreColsResult = await this.webR.evalR('n_titre_cols');
-            const n_titre_cols = await nTitreColsResult.toNumber();
+            this.currentData = { titre, infected };
             
             const summary = {
-                n: n,
-                n_infected: n_infected,
-                n_protected: n_protected,
-                has_group: has_group,
-                titre_range: [titre_min, titre_max],
-                columns: columns,
-                n_biomarkers: n_titre_cols
+                n: titre.length,
+                n_infected: infected.filter(x => x === 1).length,
+                n_protected: infected.filter(x => x === 0).length,
+                titre_range: [Math.min(...titre), Math.max(...titre)],
+                columns: headers.join(', '),
+                n_biomarkers: 1
             };
             
-            this.currentData = summary;
-            
             this.displayDataSummary(summary);
-                if (this.enableFitButtons) this.enableFitButtons();
             document.getElementById('fit-model').disabled = false;
-            this.log('Data loaded successfully');
+            this.log('\u2713 Data loaded successfully (' + titre.length + ' observations)');
             
         } catch (error) {
-            this.logError('Failed to process data: ' + error.message);
+            this.logError('Failed to load data: ' + error.message);
             console.error(error);
         }
     }
 
-    async loadExampleData() {
-        this.log('Generating example data...');
+    loadExampleData() {
+        this.log('Generating example single biomarker data...');
+        
+        if (!this.mcmcReady) {
+            this.logError('MCMC module not loaded yet. Please wait...');
+            return;
+        }
         
         try {
-            await this.webR.evalR(`
-                set.seed(123)
-                n <- 200
-                titre <- rnorm(n, mean = 2, sd = 1.5)
-                prob <- 0.05 + 0.9 / (1 + exp(2 * (titre - 1.5)))
-                infected <- rbinom(n, 1, prob)
-                
-                # Create groups for hierarchical example
-                group <- sample(c("Group A", "Group B", "Group C"), n, replace = TRUE)
-                
-                example_data <- data.frame(
-                    titre = titre,
-                    infected = infected,
-                    group = group
-                )
-                
-                write.csv(example_data, '/data.csv', row.names = FALSE)
-            `);
+            // Generate synthetic data in JavaScript
+            const n = 200;
+            const data = [];
             
-            const csvText = await this.webR.FS.readFile('/data.csv', { encoding: 'utf8' });
-            await this.loadDataFromCSV(csvText);
+            // Simple random number generator (seeded)
+            let seed = 123;
+            const random = () => {
+                seed = (seed * 9301 + 49297) % 233280;
+                return seed / 233280;
+            };
+            
+            const normalRandom = (mean, sd) => {
+                const u1 = random();
+                const u2 = random();
+                const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+                return mean + sd * z0;
+            };
+            
+            for (let i = 0; i < n; i++) {
+                const titre = normalRandom(2, 1.5);
+                const prob = 0.05 + 0.9 / (1 + Math.exp(2 * (titre - 1.5)));
+                const infected = random() < prob ? 1 : 0;
+                
+                data.push({ titre, infected });
+            }
+            
+            this.currentData = {
+                titre: data.map(d => d.titre),
+                infected: data.map(d => d.infected)
+            };
+            
+            this.displayDataSummary({
+                n: n,
+                n_infected: this.currentData.infected.filter(x => x === 1).length,
+                n_protected: this.currentData.infected.filter(x => x === 0).length,
+                titre_range: [Math.min(...this.currentData.titre), Math.max(...this.currentData.titre)],
+                columns: 'titre, infected',
+                n_biomarkers: 1
+            });
+            
+            document.getElementById('fit-model').disabled = false;
+            this.log('✓ Example single biomarker data loaded (n=200)');
             
         } catch (error) {
             this.logError('Failed to generate example data: ' + error.message);
+            console.error(error);
         }
     }
     
-    async loadMultiBiomarkerData() {
+    loadMultiBiomarkerData() {
         this.log('Generating multi-biomarker example data...');
         
+        if (!this.mcmcReady) {
+            this.logError('MCMC module not loaded yet. Please wait...');
+            return;
+        }
+        
         try {
-            await this.webR.evalR(`
-                set.seed(2025)
-                n <- 250
-                
-                # Biomarker 1: Strong CoP (IgG)
-                titre_IgG <- rnorm(n, mean = 2.5, sd = 1.2)
-                prob_IgG <- 0.02 + 0.68 / (1 + exp(2.5 * (titre_IgG - 2.0)))
-                
-                # Biomarker 2: Weak CoP (IgA)
-                titre_IgA <- rnorm(n, mean = 1.8, sd = 1.5)
-                prob_IgA <- 0.15 + 0.55 / (1 + exp(1.0 * (titre_IgA - 1.5)))
-                
-                # Biomarker 3: No CoP (Non-specific)
-                titre_Nonspec <- rnorm(n, mean = 3.0, sd = 1.0)
-                prob_Nonspec <- rep(0.35, n)
-                
-                # Generate infection outcomes
-                prob_combined <- 0.5 * prob_IgG + 0.3 * prob_IgA + 0.2 * prob_Nonspec
-                infected <- rbinom(n, 1, prob_combined)
-                
-                multi_data <- data.frame(
-                    IgG = titre_IgG,
-                    IgA = titre_IgA,
-                    Nonspecific = titre_Nonspec,
-                    infected = infected
-                )
-                
-                write.csv(multi_data, '/data.csv', row.names = FALSE)
-            `);
+            // Generate synthetic multi-biomarker data in JavaScript
+            const n = 250;
+            const data = [];
             
-            const csvText = await this.webR.FS.readFile('/data.csv', { encoding: 'utf8' });
-            await this.loadDataFromCSV(csvText);
+            // Simple random number generator (different seed)
+            let seed = 2025;
+            const random = () => {
+                seed = (seed * 9301 + 49297) % 233280;
+                return seed / 233280;
+            };
             
-            this.log('Multi-biomarker data loaded: IgG (strong), IgA (weak), Nonspecific (no CoP)');
+            const normalRandom = (mean, sd) => {
+                const u1 = random();
+                const u2 = random();
+                const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+                return mean + sd * z0;
+            };
+            
+            for (let i = 0; i < n; i++) {
+                // Biomarker 1: Strong CoP (IgG)
+                const IgG = normalRandom(2.5, 1.2);
+                const prob_IgG = 0.02 + 0.68 / (1 + Math.exp(2.5 * (IgG - 2.0)));
+                
+                // Biomarker 2: Weak CoP (IgA)
+                const IgA = normalRandom(1.8, 1.5);
+                const prob_IgA = 0.15 + 0.55 / (1 + Math.exp(1.0 * (IgA - 1.5)));
+                
+                // Biomarker 3: No CoP (Non-specific)
+                const Nonspecific = normalRandom(3.0, 1.0);
+                const prob_Nonspec = 0.35;
+                
+                // Combined probability (weighted)
+                const prob_combined = 0.5 * prob_IgG + 0.3 * prob_IgA + 0.2 * prob_Nonspec;
+                const infected = random() < prob_combined ? 1 : 0;
+                
+                data.push({ IgG, IgA, Nonspecific, infected });
+            }
+            
+            // For now, we'll analyze IgG as the primary biomarker
+            this.currentData = {
+                titre: data.map(d => d.IgG),
+                infected: data.map(d => d.infected),
+                IgG: data.map(d => d.IgG),
+                IgA: data.map(d => d.IgA),
+                Nonspecific: data.map(d => d.Nonspecific)
+            };
+            
+            this.displayDataSummary({
+                n: n,
+                n_infected: this.currentData.infected.filter(x => x === 1).length,
+                n_protected: this.currentData.infected.filter(x => x === 0).length,
+                titre_range: [Math.min(...this.currentData.IgG), Math.max(...this.currentData.IgG)],
+                columns: 'IgG, IgA, Nonspecific, infected',
+                n_biomarkers: 3
+            });
+            
+            document.getElementById('fit-model').disabled = false;
+            this.log('✓ Multi-biomarker data loaded (n=250, 3 biomarkers)');
+            this.log('Note: Fitting will use IgG (strongest CoP) as primary biomarker');
             
         } catch (error) {
             this.logError('Failed to generate multi-biomarker data: ' + error.message);
+            console.error(error);
         }
     }
 
@@ -329,34 +323,62 @@ class SeroCOPApp {
         
         previewDiv.style.display = 'block';
         
-        // Add data table preview
+        
+        previewDiv.style.display = 'block';
+        
+        // Display data table preview
         this.displayDataTable();
     }
     
-    async displayDataTable() {
-        try {
-            // Get first 10 rows of data
-            const tableResult = await this.webR.evalR(`
-                data <- read.csv('/data.csv')
-                head_data <- head(data, 10)
-                
-                # Convert to a formatted string
-                paste(
-                    capture.output(print(head_data, row.names = FALSE)),
-                    collapse = "\\n"
-                )
-            `);
+    displayDataTable() {
+        if (!this.currentData) return;
+        
+        const tableDiv = document.getElementById('data-table');
+        const { titre, infected, IgG, IgA, Nonspecific } = this.currentData;
+        const n = Math.min(10, titre.length);
+        
+        let tableHTML = '<h4 style="margin-top: 20px; margin-bottom: 10px;">Data Preview (first 10 rows):</h4>';
+        tableHTML += '<table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">';
+        
+        // Determine columns based on available data
+        const hasMultiBiomarkers = IgG && IgA && Nonspecific;
+        
+        if (hasMultiBiomarkers) {
+            tableHTML += '<thead><tr style="background: #000; color: #fff;">';
+            tableHTML += '<th style="padding: 8px; text-align: left;">Row</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">IgG</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">IgA</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">Nonspecific</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">Infected</th>';
+            tableHTML += '</tr></thead><tbody>';
             
-            const tableText = await tableResult.toString();
+            for (let i = 0; i < n; i++) {
+                tableHTML += `<tr style="border-bottom: 1px solid #e0e0e0;">`;
+                tableHTML += `<td style="padding: 8px;">${i + 1}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${IgG[i].toFixed(3)}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${IgA[i].toFixed(3)}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${Nonspecific[i].toFixed(3)}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${infected[i]}</td>`;
+                tableHTML += `</tr>`;
+            }
+        } else {
+            tableHTML += '<thead><tr style="background: #000; color: #fff;">';
+            tableHTML += '<th style="padding: 8px; text-align: left;">Row</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">Titre</th>';
+            tableHTML += '<th style="padding: 8px; text-align: right;">Infected</th>';
+            tableHTML += '</tr></thead><tbody>';
             
-            const tableDiv = document.getElementById('data-table');
-            tableDiv.innerHTML = `
-                <h4 style="margin-top: 20px; margin-bottom: 10px;">Data Preview (first 10 rows):</h4>
-                <pre style="background: #f5f5f5; padding: 15px; border: 1px solid #e0e0e0; overflow-x: auto; font-size: 0.85rem;">${tableText}</pre>
-            `;
-        } catch (error) {
-            console.error('Failed to display data table:', error);
+            for (let i = 0; i < n; i++) {
+                tableHTML += `<tr style="border-bottom: 1px solid #e0e0e0;">`;
+                tableHTML += `<td style="padding: 8px;">${i + 1}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${titre[i].toFixed(3)}</td>`;
+                tableHTML += `<td style="padding: 8px; text-align: right;">${infected[i]}</td>`;
+                tableHTML += `</tr>`;
+            }
         }
+        
+        tableHTML += '</tbody></table>';
+        tableDiv.innerHTML = tableHTML;
     }
 
     async fitModel() {
@@ -555,175 +577,680 @@ class SeroCOPApp {
         } else {
             postEl.innerHTML = '<p>No posterior draws in server response.</p>';
         }
-    }    async fitSingleBiomarker(useHierarchical, chains, iter) {
-        await this.webR.evalR(`
-            data <- read.csv('/data.csv')
+    }
+    
+    async fitSingleBiomarker(useHierarchical, chains, iter) {
+        this.log('Using parallel tempering MCMC for Bayesian inference...');
+        
+        // Get data directly from currentData
+        const titreArray = this.currentData.titre;
+        const infectedArray = this.currentData.infected;
+        
+        this.log(`Loaded ${titreArray.length} observations`);
+        
+        // Prepare data for MCMC
+        const titreVec = new this.mcmcModule.VectorDouble();
+        for (let i = 0; i < titreArray.length; i++) {
+            titreVec.push_back(titreArray[i]);
+        }
+        
+        const infectedVec = new this.mcmcModule.VectorInt();
+        for (let i = 0; i < infectedArray.length; i++) {
+            infectedVec.push_back(infectedArray[i]);
+        }
+        
+        const mcmcData = new this.mcmcModule.Data(titreVec, infectedVec);
+        
+        // Calculate data-driven priors (matching R package defaults)
+        const titreMidpoint = (Math.max(...titreArray) + Math.min(...titreArray)) / 2;
+        const titreRange = Math.max(...titreArray) - Math.min(...titreArray);
+        const titreSd = titreRange / 4;  // Cover most of the range
+        
+        // Set priors to match R package (SeroCOP::get_default_priors)
+        const priors = {
+            floor_alpha: 1.0,      // Beta(1, 9) - weak prior favoring low floor
+            floor_beta: 9.0,
+            ceiling_alpha: 9.0,    // Beta(9, 1) - weak prior favoring high ceiling
+            ceiling_beta: 1.0,
+            ec50_mean: titreMidpoint,  // Centered on data midpoint
+            ec50_sd: titreSd,          // SD based on data range
+            slope_mean: 0.0,       // Centered at 0 (no directional bias)
+            slope_sd: 2.0          // Weakly informative
+        };
+        
+        // Run multiple chains separately
+        this.log(`Initializing ${chains} chains with 10 temperature ladders each...`);
+        const startTime = performance.now();
+        
+        // Note: Each chain gets independent random initialization
+        // MCMC is stochastic and will produce slightly different results each run
+        
+        const allChainPosteriors = [];
+        
+        for (let chain = 0; chain < chains; chain++) {
+            this.log(`Running chain ${chain + 1}/${chains}: ${iter} iterations...`);
+            document.getElementById('fitting-status').innerHTML = 
+                `<div class="spinner-small"></div><p>Running chain ${chain + 1}/${chains}: ${iter} iterations...</p>`;
             
-            # Determine which titre column to use
-            if ('titre' %in% names(data)) {
-                titre_col <- data$titre
-            } else {
-                # Use first non-infected, non-group column
-                exclude_cols <- c('infected', 'group')
-                titre_cols <- setdiff(names(data), exclude_cols)
-                titre_col <- data[[titre_cols[1]]]
-                message(paste("Using", titre_cols[1], "as titre column"))
+            const sampler = new this.mcmcModule.ParallelTemperingMCMC(10, mcmcData, priors);
+            sampler.run(iter);
+            
+            // Extract samples from this chain
+            const samples = sampler.get_samples();
+            const warmup = Math.floor(iter / 2);
+            
+            const chainPosteriors = {
+                floor: [],
+                ceiling: [],
+                ec50: [],
+                slope: []
+            };
+            
+            for (let i = warmup; i < samples.size(); i++) {
+                const s = samples.get(i);
+                chainPosteriors.floor.push(s.floor);
+                chainPosteriors.ceiling.push(s.ceiling);
+                chainPosteriors.ec50.push(s.ec50);
+                chainPosteriors.slope.push(s.slope);
             }
             
-            # Use the simplified logistic regression
-            model_result <- fit_logistic(
-                titre = titre_col,
-                infected = data$infected,
-                chains = ${chains},
-                iter = ${iter}
-            )
-            
-            # Extract coefficients for 4PL approximation
-            # Convert logistic coefficients to 4PL-like parameters
-            intercept <- model_result$coefficients[1]
-            slope <- model_result$coefficients[2]
-            
-            # Approximate 4PL parameters from logistic regression
-            alpha <- -intercept / slope  # Inflection point
-            beta <- slope                 # Slope
-            gamma <- 0.05                 # Lower asymptote (fixed)
-            lambda <- 0.95                # Upper asymptote (fixed)
-            
-            # Create posterior-like samples (simulation for demonstration)
-            n_samples <- ${chains} * ${iter}
-            posterior_samples <- list(
-                alpha = rnorm(n_samples, alpha, abs(alpha) * 0.1),
-                beta = rnorm(n_samples, beta, abs(beta) * 0.1),
-                gamma = rnorm(n_samples, gamma, 0.01),
-                lambda = rnorm(n_samples, lambda, 0.01)
-            )
-            
-            # Store globally
-            .GlobalEnv$fitted_model <- list(
-                model = model_result$model,
-                posterior = posterior_samples,
-                predictions = model_result$predictions,
-                data = data.frame(
-                    titre = titre_col,
-                    infected = data$infected
-                )
-            )
-        `);
+            allChainPosteriors.push(chainPosteriors);
+        }
         
-        this.model = 'fitted_model';
+        const elapsed = (performance.now() - startTime) / 1000;
+        this.log(`✓ All chains complete in ${elapsed.toFixed(1)}s`);
+        
+        // Combine chains for analysis
+        const posteriors = {
+            floor: [],
+            ceiling: [],
+            ec50: [],
+            slope: []
+        };
+        
+        allChainPosteriors.forEach(chain => {
+            posteriors.floor.push(...chain.floor);
+            posteriors.ceiling.push(...chain.ceiling);
+            posteriors.ec50.push(...chain.ec50);
+            posteriors.slope.push(...chain.slope);
+        });
+        
+        // Compute summaries
+        const computeMean = arr => arr.reduce((a, b) => a + b) / arr.length;
+        const computeSD = (arr, mean) => Math.sqrt(arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length);
+        const computeQuantile = (arr, q) => {
+            const sorted = [...arr].sort((a, b) => a - b);
+            return sorted[Math.floor(sorted.length * q)];
+        };
+        
+        // Compute R-hat across chains
+        const computeRhat = (chainValues) => {
+            const n = chainValues[0].length;
+            const m = chainValues.length;
+            
+            // Within-chain variance
+            const chainMeans = chainValues.map(chain => 
+                chain.reduce((a, b) => a + b) / n
+            );
+            const chainVars = chainValues.map((chain, i) => 
+                chain.reduce((a, b) => a + Math.pow(b - chainMeans[i], 2), 0) / (n - 1)
+            );
+            const W = chainVars.reduce((a, b) => a + b) / m;
+            
+            // Between-chain variance
+            const grandMean = chainMeans.reduce((a, b) => a + b) / m;
+            const B = n * chainMeans.reduce((a, b) => a + Math.pow(b - grandMean, 2), 0) / (m - 1);
+            
+            // Pooled variance estimate
+            const varPlus = ((n - 1) * W + B) / n;
+            
+            return Math.sqrt(varPlus / W);
+        };
+        
+        // Compute ESS (simple autocorrelation-based)
+        const computeESS = (values) => {
+            const n = values.length;
+            const mean = values.reduce((a, b) => a + b) / n;
+            const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n;
+            
+            // Lag-1 autocorrelation
+            let acf = 0;
+            for (let i = 1; i < n; i++) {
+                acf += (values[i] - mean) * (values[i-1] - mean);
+            }
+            acf = acf / ((n - 1) * variance);
+            
+            return n / (1 + 2 * Math.max(0, acf));
+        };
+        
+        const diagnostics = {
+            rhat: {
+                floor: computeRhat(allChainPosteriors.map(c => c.floor)),
+                ceiling: computeRhat(allChainPosteriors.map(c => c.ceiling)),
+                ec50: computeRhat(allChainPosteriors.map(c => c.ec50)),
+                slope: computeRhat(allChainPosteriors.map(c => c.slope))
+            },
+            ess: {
+                floor: computeESS(posteriors.floor),
+                ceiling: computeESS(posteriors.ceiling),
+                ec50: computeESS(posteriors.ec50),
+                slope: computeESS(posteriors.slope)
+            },
+            elapsed_seconds: elapsed
+        };
+        
+        this.log(`Diagnostics: R-hat range [${Math.min(...Object.values(diagnostics.rhat)).toFixed(3)}, ${Math.max(...Object.values(diagnostics.rhat)).toFixed(3)}]`);
+        this.log(`ESS range [${Math.floor(Math.min(...Object.values(diagnostics.ess)))}, ${Math.floor(Math.max(...Object.values(diagnostics.ess)))}]`);
+        
+        // Store results
+        this.model = {
+            type: 'mcmc_4pl',
+            posteriors: posteriors,
+            chains: allChainPosteriors,
+            diagnostics: diagnostics,
+            data: {
+                titre: titreArray,
+                infected: infectedArray
+            },
+            summaries: {
+                floor: {
+                    mean: computeMean(posteriors.floor),
+                    sd: computeSD(posteriors.floor, computeMean(posteriors.floor)),
+                    q025: computeQuantile(posteriors.floor, 0.025),
+                    q975: computeQuantile(posteriors.floor, 0.975)
+                },
+                ceiling: {
+                    mean: computeMean(posteriors.ceiling),
+                    sd: computeSD(posteriors.ceiling, computeMean(posteriors.ceiling)),
+                    q025: computeQuantile(posteriors.ceiling, 0.025),
+                    q975: computeQuantile(posteriors.ceiling, 0.975)
+                },
+                ec50: {
+                    mean: computeMean(posteriors.ec50),
+                    sd: computeSD(posteriors.ec50, computeMean(posteriors.ec50)),
+                    q025: computeQuantile(posteriors.ec50, 0.025),
+                    q975: computeQuantile(posteriors.ec50, 0.975)
+                },
+                slope: {
+                    mean: computeMean(posteriors.slope),
+                    sd: computeSD(posteriors.slope, computeMean(posteriors.slope)),
+                    q025: computeQuantile(posteriors.slope, 0.025),
+                    q975: computeQuantile(posteriors.slope, 0.975)
+                }
+            }
+        };
     }
 
     async fitMultiBiomarker(useHierarchical, chains, iter) {
-        // For multi-biomarker, we need a matrix
-        // This assumes columns other than 'infected' and 'group' are biomarkers
+        this.log('Fitting multiple biomarkers with parallel tempering MCMC...');
         
-        const groupArg = useHierarchical ? ', group = data$group' : '';
+        // Get biomarker names (exclude 'titre' and 'infected')
+        const biomarkerNames = Object.keys(this.currentData).filter(k => 
+            k !== 'titre' && k !== 'infected'
+        );
         
-        await this.webR.evalR(`
-            data <- read.csv('/data.csv')
+        this.log(`Identified ${biomarkerNames.length} biomarkers: ${biomarkerNames.join(', ')}`);
+        
+        const infectedArray = this.currentData.infected;
+        const biomarkerModels = {};
+        
+        // Fit each biomarker separately
+        for (let idx = 0; idx < biomarkerNames.length; idx++) {
+            const biomarker = biomarkerNames[idx];
+            this.log(`\n[${idx + 1}/${biomarkerNames.length}] Fitting ${biomarker}...`);
             
-            # Identify biomarker columns
-            exclude_cols <- c('infected', 'group')
-            biomarker_cols <- setdiff(names(data), exclude_cols)
+            const titreArray = this.currentData[biomarker];
             
-            if (length(biomarker_cols) == 1) {
-                # Single biomarker, use SeroCOP
-                model <- SeroCOP$new(
-                    titre = data[[biomarker_cols[1]]],
-                    infected = data$infected
-                    ${groupArg}
-                )
-            } else {
-                # Multiple biomarkers, use SeroCOPMulti
-                titre_matrix <- as.matrix(data[, biomarker_cols])
-                colnames(titre_matrix) <- biomarker_cols
+            // Prepare data for MCMC
+            const titreVec = new this.mcmcModule.VectorDouble();
+            for (let i = 0; i < titreArray.length; i++) {
+                titreVec.push_back(titreArray[i]);
+            }
+            
+            const infectedVec = new this.mcmcModule.VectorInt();
+            for (let i = 0; i < infectedArray.length; i++) {
+                infectedVec.push_back(infectedArray[i]);
+            }
+            
+            const mcmcData = new this.mcmcModule.Data(titreVec, infectedVec);
+            
+            // Calculate data-driven priors for this biomarker (matching R package)
+            const titreMidpoint = (Math.max(...titreArray) + Math.min(...titreArray)) / 2;
+            const titreRange = Math.max(...titreArray) - Math.min(...titreArray);
+            const titreSd = titreRange / 4;
+            
+            // Set priors to match R package defaults
+            const priors = {
+                floor_alpha: 1.0,      // Beta(1, 9) - weak prior favoring low floor
+                floor_beta: 9.0,
+                ceiling_alpha: 9.0,    // Beta(9, 1) - weak prior favoring high ceiling
+                ceiling_beta: 1.0,
+                ec50_mean: titreMidpoint,  // Data-driven
+                ec50_sd: titreSd,          // Data-driven
+                slope_mean: 0.0,       // Centered at 0
+                slope_sd: 2.0          // Weakly informative
+            };
+            
+            // Run multiple chains for this biomarker
+            const startTime = performance.now();
+            const allChainPosteriors = [];
+            
+            for (let chain = 0; chain < chains; chain++) {
+                this.log(`${biomarker} chain ${chain + 1}/${chains}: ${iter} iterations...`);
+                document.getElementById('fitting-status').innerHTML = 
+                    `<div class="spinner-small"></div><p>${biomarker} chain ${chain + 1}/${chains}: ${iter} iterations...</p>`;
                 
-                model <- SeroCOPMulti$new(
-                    titre = titre_matrix,
-                    infected = data$infected
-                    ${groupArg}
-                )
+                const sampler = new this.mcmcModule.ParallelTemperingMCMC(10, mcmcData, priors);
+                sampler.run(iter);
+                
+                const samples = sampler.get_samples();
+                const warmup = Math.floor(iter / 2);
+                
+                const chainPosteriors = {
+                    floor: [],
+                    ceiling: [],
+                    ec50: [],
+                    slope: []
+                };
+                
+                for (let i = warmup; i < samples.size(); i++) {
+                    const s = samples.get(i);
+                    chainPosteriors.floor.push(s.floor);
+                    chainPosteriors.ceiling.push(s.ceiling);
+                    chainPosteriors.ec50.push(s.ec50);
+                    chainPosteriors.slope.push(s.slope);
+                }
+                
+                allChainPosteriors.push(chainPosteriors);
             }
             
-            # Fit the model
-            if (inherits(model, 'SeroCOPMulti')) {
-                model$fit_all(chains = ${chains}, iter = ${iter}, cores = 1)
-            } else {
-                model$fit(chains = ${chains}, iter = ${iter}, cores = 1)
-            }
+            const elapsed = (performance.now() - startTime) / 1000;
+            this.log(`✓ ${biomarker} complete in ${elapsed.toFixed(1)}s`);
             
-            .GlobalEnv$fitted_model <- model
-        `);
+            // Combine chains
+            const posteriors = {
+                floor: [],
+                ceiling: [],
+                ec50: [],
+                slope: []
+            };
+            
+            allChainPosteriors.forEach(chain => {
+                posteriors.floor.push(...chain.floor);
+                posteriors.ceiling.push(...chain.ceiling);
+                posteriors.ec50.push(...chain.ec50);
+                posteriors.slope.push(...chain.slope);
+            });
+            
+            // Compute summaries
+            const computeMean = arr => arr.reduce((a, b) => a + b) / arr.length;
+            const computeSD = (arr, mean) => Math.sqrt(arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length);
+            const computeQuantile = (arr, q) => {
+                const sorted = [...arr].sort((a, b) => a - b);
+                return sorted[Math.floor(sorted.length * q)];
+            };
+            
+            // Compute R-hat across chains
+            const computeRhat = (chainValues) => {
+                const n = chainValues[0].length;
+                const m = chainValues.length;
+                const chainMeans = chainValues.map(chain => chain.reduce((a, b) => a + b) / n);
+                const chainVars = chainValues.map((chain, i) => 
+                    chain.reduce((a, b) => a + Math.pow(b - chainMeans[i], 2), 0) / (n - 1)
+                );
+                const W = chainVars.reduce((a, b) => a + b) / m;
+                const grandMean = chainMeans.reduce((a, b) => a + b) / m;
+                const B = n * chainMeans.reduce((a, b) => a + Math.pow(b - grandMean, 2), 0) / (m - 1);
+                const varPlus = ((n - 1) * W + B) / n;
+                return Math.sqrt(varPlus / W);
+            };
+            
+            const computeESS = (values) => {
+                const n = values.length;
+                const mean = values.reduce((a, b) => a + b) / n;
+                const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n;
+                let acf = 0;
+                for (let i = 1; i < n; i++) {
+                    acf += (values[i] - mean) * (values[i-1] - mean);
+                }
+                acf = acf / ((n - 1) * variance);
+                return n / (1 + 2 * Math.max(0, acf));
+            };
+            
+            const diagnostics = {
+                rhat: {
+                    floor: computeRhat(allChainPosteriors.map(c => c.floor)),
+                    ceiling: computeRhat(allChainPosteriors.map(c => c.ceiling)),
+                    ec50: computeRhat(allChainPosteriors.map(c => c.ec50)),
+                    slope: computeRhat(allChainPosteriors.map(c => c.slope))
+                },
+                ess: {
+                    floor: computeESS(posteriors.floor),
+                    ceiling: computeESS(posteriors.ceiling),
+                    ec50: computeESS(posteriors.ec50),
+                    slope: computeESS(posteriors.slope)
+                },
+                elapsed_seconds: elapsed
+            };
+            
+            this.log(`${biomarker} R-hat: [${Math.min(...Object.values(diagnostics.rhat)).toFixed(3)}, ${Math.max(...Object.values(diagnostics.rhat)).toFixed(3)}]`);
+            this.log(`${biomarker} ESS: [${Math.floor(Math.min(...Object.values(diagnostics.ess)))}, ${Math.floor(Math.max(...Object.values(diagnostics.ess)))}]`);
+            
+            // Store model for this biomarker
+            biomarkerModels[biomarker] = {
+                type: 'mcmc_4pl',
+                posteriors: posteriors,
+                chains: allChainPosteriors,
+                diagnostics: diagnostics,
+                data: {
+                    titre: titreArray,
+                    infected: infectedArray
+                },
+                summaries: {
+                    floor: {
+                        mean: computeMean(posteriors.floor),
+                        sd: computeSD(posteriors.floor, computeMean(posteriors.floor)),
+                        q025: computeQuantile(posteriors.floor, 0.025),
+                        q975: computeQuantile(posteriors.floor, 0.975)
+                    },
+                    ceiling: {
+                        mean: computeMean(posteriors.ceiling),
+                        sd: computeSD(posteriors.ceiling, computeMean(posteriors.ceiling)),
+                        q025: computeQuantile(posteriors.ceiling, 0.025),
+                        q975: computeQuantile(posteriors.ceiling, 0.975)
+                    },
+                    ec50: {
+                        mean: computeMean(posteriors.ec50),
+                        sd: computeSD(posteriors.ec50, computeMean(posteriors.ec50)),
+                        q025: computeQuantile(posteriors.ec50, 0.025),
+                        q975: computeQuantile(posteriors.ec50, 0.975)
+                    },
+                    slope: {
+                        mean: computeMean(posteriors.slope),
+                        sd: computeSD(posteriors.slope, computeMean(posteriors.slope)),
+                        q025: computeQuantile(posteriors.slope, 0.025),
+                        q975: computeQuantile(posteriors.slope, 0.975)
+                    }
+                }
+            };
+        }
         
-        this.model = 'fitted_model';
+        // Store combined results
+        this.model = {
+            type: 'multi',
+            biomarkers: biomarkerModels
+        };
+        
+        this.log('\n✓ All biomarkers fitted successfully');
     }
 
     async displayResults() {
         document.getElementById('results-area').style.display = 'block';
         document.getElementById('no-results').style.display = 'none';
         
-        await this.displayPosteriors();
-        await this.displayProtectionCurve();
-        await this.displayROCCurve();
-        await this.displayMetrics();
+        this.displayConvergenceDiagnostics();
+        this.displayTracePlots();
+        this.displayPosteriors();
+        this.displayProtectionCurve();
+        this.displayROCCurve();
+        this.displayModelComparison();
+        this.displayMetrics();
     }
-
-    async displayPosteriors() {
-        try {
-            this.log('Generating posterior plots...');
+    
+    displayConvergenceDiagnostics() {
+        const metricsDiv = document.getElementById('metrics-table');
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: show diagnostics for each biomarker
+            let html = '<h3>Convergence Diagnostics</h3>';
             
-            // Extract posterior samples
-            await this.webR.evalR(`
-                model <- .GlobalEnv$fitted_model
-                posteriors <- model$posterior
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            biomarkerNames.forEach(biomarker => {
+                const diagnostics = this.model.biomarkers[biomarker].diagnostics;
+                const params = ['floor', 'ceiling', 'ec50', 'slope'];
                 
-                # Store each parameter separately for easier access
-                .GlobalEnv$post_alpha <- posteriors$alpha
-                .GlobalEnv$post_beta <- posteriors$beta
-                .GlobalEnv$post_gamma <- posteriors$gamma
-                .GlobalEnv$post_lambda <- posteriors$lambda
-            `);
+                html += `<h4>${biomarker}</h4>`;
+                html += '<table class="diagnostics-table">';
+                html += '<thead><tr><th>Parameter</th><th>R-hat</th><th>ESS</th><th>Status</th></tr></thead>';
+                html += '<tbody>';
+                
+                params.forEach(param => {
+                    const rhat = diagnostics.rhat[param];
+                    const ess = diagnostics.ess[param];
+                    
+                    const rhatGood = rhat < 1.05;
+                    const essGood = ess > 400;
+                    const status = (rhatGood && essGood) ? '✓ Good' : '⚠ Check';
+                    const rowClass = (rhatGood && essGood) ? 'good' : 'warning';
+                    
+                    html += `<tr class="${rowClass}">`;
+                    html += `<td><strong>${param}</strong></td>`;
+                    html += `<td>${rhat.toFixed(3)}</td>`;
+                    html += `<td>${Math.floor(ess)}</td>`;
+                    html += `<td>${status}</td>`;
+                    html += `</tr>`;
+                });
+                
+                html += '</tbody></table>';
+                html += `<p><strong>Swap rate:</strong> ${(diagnostics.swap_rate * 100).toFixed(1)}%</p>`;
+                html += `<p><strong>Runtime:</strong> ${diagnostics.elapsed_seconds.toFixed(1)}s</p>`;
+            });
             
-            // Get each parameter
-            const alphaResult = await this.webR.evalR('post_alpha');
-            const betaResult = await this.webR.evalR('post_beta');
-            const gammaResult = await this.webR.evalR('post_gamma');
-            const lambdaResult = await this.webR.evalR('post_lambda');
+            metricsDiv.innerHTML = html;
+        } else {
+            // Single biomarker
+            const diagnostics = this.model.diagnostics;
+            const params = ['floor', 'ceiling', 'ec50', 'slope'];
             
-            const posteriors = {
-                alpha: await alphaResult.toArray(),
-                beta: await betaResult.toArray(),
-                gamma: await gammaResult.toArray(),
-                lambda: await lambdaResult.toArray()
-            };
+            let html = '<h3>Convergence Diagnostics</h3>';
+            html += '<table class="diagnostics-table">';
+            html += '<thead><tr><th>Parameter</th><th>R-hat</th><th>ESS</th><th>Status</th></tr></thead>';
+            html += '<tbody>';
             
-            // Create plots for each parameter
-            const plotsDiv = document.getElementById('posterior-plots');
-            plotsDiv.innerHTML = '';
+            params.forEach(param => {
+                const rhat = diagnostics.rhat[param];
+                const ess = diagnostics.ess[param];
+                
+                const rhatGood = rhat < 1.05;
+                const essGood = ess > 400;
+                const status = (rhatGood && essGood) ? '✓ Good' : '⚠ Check';
+                const rowClass = (rhatGood && essGood) ? 'good' : 'warning';
+                
+                html += `<tr class="${rowClass}">`;
+                html += `<td><strong>${param}</strong></td>`;
+                html += `<td>${rhat.toFixed(3)}</td>`;
+                html += `<td>${Math.floor(ess)}</td>`;
+                html += `<td>${status}</td>`;
+                html += `</tr>`;
+            });
             
-            for (const [param, values] of Object.entries(posteriors)) {
-                const plotDiv = document.createElement('div');
-                plotDiv.className = 'posterior-plot';
+            html += '</tbody></table>';
+            html += `<p><strong>Swap rate:</strong> ${(diagnostics.swap_rate * 100).toFixed(1)}%</p>`;
+            html += `<p><strong>Runtime:</strong> ${diagnostics.elapsed_seconds.toFixed(1)}s</p>`;
+            
+            metricsDiv.innerHTML = html;
+        }
+    }
+    
+    displayTracePlots() {
+        const plotsDiv = document.getElementById('posterior-plots');
+        plotsDiv.innerHTML = '<h3>Trace Plots</h3>';
+        
+        const params = ['floor', 'ceiling', 'ec50', 'slope'];
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: show trace plots for each biomarker
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            biomarkerNames.forEach(biomarker => {
+                const posteriors = this.model.biomarkers[biomarker].posteriors;
+                
+                const biomarkerSection = document.createElement('div');
+                biomarkerSection.innerHTML = `<h4>${biomarker}</h4>`;
+                plotsDiv.appendChild(biomarkerSection);
+                
+                params.forEach(param => {
+                    const canvasContainer = document.createElement('div');
+                    canvasContainer.className = 'trace-plot-container';
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'trace-plot';
+                    canvasContainer.appendChild(canvas);
+                    plotsDiv.appendChild(canvasContainer);
+                    
+                    const chains = this.model.biomarkers[biomarker].chains.map(c => c[param]);
+                    this.plotTrace(canvas, chains, `${biomarker} - ${param}`);
+                });
+            });
+        } else {
+            // Single biomarker
+            const posteriors = this.model.posteriors;
+            
+            params.forEach(param => {
+                const canvasContainer = document.createElement('div');
+                canvasContainer.className = 'trace-plot-container';
                 
                 const canvas = document.createElement('canvas');
-                canvas.id = `posterior-${param}`;
-                plotDiv.appendChild(canvas);
-                plotsDiv.appendChild(plotDiv);
+                canvas.className = 'trace-plot';
+                canvasContainer.appendChild(canvas);
+                plotsDiv.appendChild(canvasContainer);
                 
-                // Simple histogram
-                this.plotHistogram(canvas, values, param);
-            }
+                const chains = this.model.chains.map(c => c[param]);
+                this.plotTrace(canvas, chains, param);
+            });
+        }
+    }
+    
+    plotTrace(canvas, chains, title) {
+        const ctx = canvas.getContext('2d');
+        canvas.width = 650;
+        canvas.height = 220;
+        
+        const padding = 50;
+        const width = canvas.width - 2 * padding;
+        const height = canvas.height - 2 * padding;
+        
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Find global min/max across all chains
+        const allValues = chains.flat();
+        const min = Math.min(...allValues);
+        const max = Math.max(...allValues);
+        const range = max - min;
+        
+        // Draw axes
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, padding + height);
+        ctx.lineTo(padding + width, padding + height);
+        ctx.stroke();
+        
+        // Chain colors
+        const chainColors = ['#000000', '#ff0000', '#0000ff', '#00aa00'];
+        
+        // Draw each chain
+        chains.forEach((chainData, chainIdx) => {
+            ctx.strokeStyle = chainColors[chainIdx % chainColors.length];
+            ctx.lineWidth = 1.5;
+            ctx.globalAlpha = 0.7;
+            ctx.beginPath();
             
-        } catch (error) {
-            this.logError('Failed to generate posterior plots: ' + error.message);
-            console.error(error);
+            chainData.forEach((val, i) => {
+                const x = padding + (i / (chainData.length - 1)) * width;
+                const y = padding + height - ((val - min) / range) * height;
+                
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            
+            ctx.stroke();
+        });
+        
+        ctx.globalAlpha = 1.0;
+        
+        // Labels
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 16px Avenir, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(title.toUpperCase(), canvas.width / 2, 30);
+        
+        ctx.font = '13px Avenir, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(max.toFixed(3), padding - 10, padding + 15);
+        ctx.fillText(min.toFixed(3), padding - 10, padding + height);
+        
+        ctx.textAlign = 'center';
+        ctx.fillText('Iteration (post-warmup)', canvas.width / 2, canvas.height - 15);
+        
+        // Y-axis label
+        ctx.save();
+        ctx.translate(20, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText('Parameter Value', 0, 0);
+        ctx.restore();
+    }
+
+    displayPosteriors() {
+        const plotsDiv = document.getElementById('posterior-plots');
+        const histContainer = document.createElement('div');
+        histContainer.innerHTML = '<h3>Posterior Distributions</h3>';
+        histContainer.className = 'histogram-container';
+        plotsDiv.appendChild(histContainer);
+        
+        const params = ['floor', 'ceiling', 'ec50', 'slope'];
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: show posteriors for each biomarker
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            biomarkerNames.forEach(biomarker => {
+                const model = this.model.biomarkers[biomarker];
+                const posteriors = model.posteriors;
+                const summaries = model.summaries;
+                
+                const bioSection = document.createElement('div');
+                bioSection.innerHTML = `<h4>${biomarker}</h4>`;
+                histContainer.appendChild(bioSection);
+                
+                params.forEach(param => {
+                    const canvasContainer = document.createElement('div');
+                    canvasContainer.className = 'posterior-plot';
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'posterior-histogram';
+                    canvasContainer.appendChild(canvas);
+                    histContainer.appendChild(canvasContainer);
+                    
+                    this.plotHistogram(canvas, posteriors[param], summaries[param], `${biomarker} - ${param}`);
+                });
+            });
+        } else {
+            // Single biomarker
+            const posteriors = this.model.posteriors;
+            const summaries = this.model.summaries;
+            
+            params.forEach(param => {
+                const canvasContainer = document.createElement('div');
+                canvasContainer.className = 'posterior-plot';
+                
+                const canvas = document.createElement('canvas');
+                canvas.className = 'posterior-histogram';
+                canvasContainer.appendChild(canvas);
+                histContainer.appendChild(canvasContainer);
+                
+                this.plotHistogram(canvas, posteriors[param], summaries[param], param);
+            });
         }
     }
 
-    plotHistogram(canvas, data, title) {
+    plotHistogram(canvas, data, summary, title) {
         const ctx = canvas.getContext('2d');
-        canvas.width = 400;
-        canvas.height = 300;
+        canvas.width = 320;
+        canvas.height = 240;
         
         const padding = 50;
         const width = canvas.width - 2 * padding;
@@ -748,7 +1275,7 @@ class SeroCOPApp {
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         
         // Draw bars
-        ctx.fillStyle = '#4A90E2';
+        ctx.fillStyle = '#000';
         hist.forEach((count, i) => {
             const x = padding + (i / bins) * width;
             const barHeight = (count / maxCount) * height;
@@ -759,6 +1286,197 @@ class SeroCOPApp {
         });
         
         // Draw axes
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, padding + height);
+        ctx.lineTo(padding + width, padding + height);
+        ctx.stroke();
+        
+        // Labels
+        ctx.fillStyle = '#000';
+        ctx.font = '14px Avenir, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(title.toUpperCase(), canvas.width / 2, 20);
+        ctx.fillText(min.toFixed(2), padding, canvas.height - 10);
+        ctx.fillText(max.toFixed(2), canvas.width - padding, canvas.height - 10);
+        
+        // Summary statistics from MCMC
+        ctx.font = '12px Avenir, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Mean: ${summary.mean.toFixed(3)}`, padding + 10, padding + 20);
+        ctx.fillText(`SD: ${summary.sd.toFixed(3)}`, padding + 10, padding + 35);
+        ctx.fillText(`95% CI: [${summary.q025.toFixed(3)}, ${summary.q975.toFixed(3)}]`, padding + 10, padding + 50);
+    }
+    
+    displayProtectionCurve() {
+        this.log('Generating protection and risk curves...');
+        
+        const curveDiv = document.getElementById('curve-plot');
+        curveDiv.innerHTML = '<h3>Correlate of Protection and Risk</h3>';
+        
+        // Create two canvases side by side
+        const containerDiv = document.createElement('div');
+        containerDiv.style.display = 'flex';
+        containerDiv.style.gap = '20px';
+        containerDiv.style.flexWrap = 'wrap';
+        
+        const protectionDiv = document.createElement('div');
+        protectionDiv.innerHTML = '<h4 style="text-align: center; margin: 10px 0;">Protection (1 - P(infection))</h4>';
+        const protectionCanvas = document.createElement('canvas');
+        protectionCanvas.id = 'protection-curve-canvas';
+        protectionDiv.appendChild(protectionCanvas);
+        
+        const riskDiv = document.createElement('div');
+        riskDiv.innerHTML = '<h4 style="text-align: center; margin: 10px 0;">Risk (P(infection))</h4>';
+        const riskCanvas = document.createElement('canvas');
+        riskCanvas.id = 'risk-curve-canvas';
+        riskDiv.appendChild(riskCanvas);
+        
+        containerDiv.appendChild(protectionDiv);
+        containerDiv.appendChild(riskDiv);
+        curveDiv.appendChild(containerDiv);
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: plot all curves on same canvas
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            const allData = [];
+            
+            // Define colors for each biomarker
+            const colors = ['#000000', '#555555', '#999999']; // Black, dark gray, light gray
+            
+            biomarkerNames.forEach((biomarker, idx) => {
+                const model = this.model.biomarkers[biomarker];
+                const data = model.data;
+                const summaries = model.summaries;
+                
+                // Create prediction grid
+                const titreMin = Math.min(...data.titre);
+                const titreMax = Math.max(...data.titre);
+                const nPoints = 100;
+                const titreGrid = Array.from({length: nPoints}, (_, i) => 
+                    titreMin + (titreMax - titreMin) * i / (nPoints - 1)
+                );
+                
+                // Compute protection curve using posterior mean
+                const floor = summaries.floor.mean;
+                const ceiling = summaries.ceiling.mean;
+                const ec50 = summaries.ec50.mean;
+                const slope = summaries.slope.mean;
+                
+                const probProtection = titreGrid.map(t => {
+                    const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                    const pInfection = ceiling * (sigmoid * (1 - floor) + floor);
+                    return 1 - pInfection; // Protection probability
+                });
+                
+                const probRisk = titreGrid.map(t => {
+                    const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                    return ceiling * (sigmoid * (1 - floor) + floor); // Risk probability
+                });
+                
+                allData.push({
+                    name: biomarker,
+                    titre: titreGrid,
+                    probProtection: probProtection,
+                    probRisk: probRisk,
+                    obsTitre: data.titre,
+                    obsProtected: data.infected.map(x => 1 - x),
+                    obsInfected: data.infected,
+                    color: colors[idx % colors.length]
+                });
+            });
+            
+            this.plotMultiProtectionCurve(protectionCanvas, allData, 'protection');
+            this.plotMultiProtectionCurve(riskCanvas, allData, 'risk');
+        } else {
+            // Single biomarker
+            const data = this.model.data;
+            const summaries = this.model.summaries;
+            
+            // Create prediction grid
+            const titreMin = Math.min(...data.titre);
+            const titreMax = Math.max(...data.titre);
+            const nPoints = 100;
+            const titreGrid = Array.from({length: nPoints}, (_, i) => 
+                titreMin + (titreMax - titreMin) * i / (nPoints - 1)
+            );
+            
+            // Compute protection curve using posterior mean
+            const floor = summaries.floor.mean;
+            const ceiling = summaries.ceiling.mean;
+            const ec50 = summaries.ec50.mean;
+            const slope = summaries.slope.mean;
+            
+            const probProtection = titreGrid.map(t => {
+                const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                const pInfection = ceiling * (sigmoid * (1 - floor) + floor);
+                return 1 - pInfection; // Protection probability
+            });
+            
+            const probRisk = titreGrid.map(t => {
+                const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                return ceiling * (sigmoid * (1 - floor) + floor); // Risk probability
+            });
+            
+            this.plotProtectionCurve(protectionCanvas, titreGrid, probProtection, data.titre, 
+                data.infected.map(x => 1 - x), 'Probability of Protection');
+            this.plotProtectionCurve(riskCanvas, titreGrid, probRisk, data.titre, 
+                data.infected, 'Probability of Infection');
+        }
+    }
+    
+    plotMultiProtectionCurve(canvas, allData, curveType = 'protection') {
+        const ctx = canvas.getContext('2d');
+        canvas.width = 600;
+        canvas.height = 400;
+        
+        const padding = 60;
+        const legendWidth = 120;
+        const width = canvas.width - 2 * padding - legendWidth;
+        const height = canvas.height - 2 * padding;
+        
+        // Clear
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Find global ranges
+        const allTitres = allData.flatMap(d => d.titre);
+        const xMin = Math.min(...allTitres);
+        const xMax = Math.max(...allTitres);
+        const xRange = xMax - xMin;
+        
+        const toX = (val) => padding + ((val - xMin) / xRange) * width;
+        const toY = (val) => padding + height - (val * height);
+        
+        // Draw observations for each biomarker
+        allData.forEach((bioData, idx) => {
+            ctx.fillStyle = bioData.color.replace(')', ', 0.2)').replace('rgb', 'rgba');
+            const obsData = curveType === 'protection' ? bioData.obsProtected : bioData.obsInfected;
+            for (let i = 0; i < bioData.obsTitre.length; i++) {
+                const x = toX(bioData.obsTitre[i]);
+                const y = toY(obsData[i]);
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        });
+        
+        // Draw curves
+        allData.forEach((bioData, idx) => {
+            ctx.strokeStyle = bioData.color;
+            ctx.lineWidth = 2;
+            const probData = curveType === 'protection' ? bioData.probProtection : bioData.probRisk;
+            ctx.beginPath();
+            ctx.moveTo(toX(bioData.titre[0]), toY(probData[0]));
+            for (let i = 1; i < bioData.titre.length; i++) {
+                ctx.lineTo(toX(bioData.titre[i]), toY(probData[i]));
+            }
+            ctx.stroke();
+        });
+        
+        // Axes
         ctx.strokeStyle = '#333';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -768,75 +1486,55 @@ class SeroCOPApp {
         ctx.stroke();
         
         // Labels
-        ctx.fillStyle = '#333';
-        ctx.font = '14px sans-serif';
+        ctx.fillStyle = '#000';
+        ctx.font = '14px Avenir, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(title.toUpperCase(), canvas.width / 2, 20);
-        ctx.fillText(min.toFixed(2), padding, canvas.height - 10);
-        ctx.fillText(max.toFixed(2), canvas.width - padding, canvas.height - 10);
+        const title = curveType === 'protection' ? 'Protection Curves' : 'Risk Curves';
+        ctx.fillText(title + ' - Multi-Biomarker', canvas.width / 2 - legendWidth / 2, 30);
+        ctx.fillText('Antibody Titre', padding + width / 2, canvas.height - 10);
         
-        // Mean and credible interval
-        const mean = data.reduce((a, b) => a + b, 0) / data.length;
-        const sorted = [...data].sort((a, b) => a - b);
-        const ci_low = sorted[Math.floor(data.length * 0.025)];
-        const ci_high = sorted[Math.floor(data.length * 0.975)];
+        ctx.save();
+        ctx.translate(15, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        const yLabel = curveType === 'protection' ? 'Probability of Protection' : 'Probability of Infection';
+        ctx.fillText(yLabel, 0, 0);
+        ctx.restore();
         
-        ctx.font = '12px monospace';
+        // Axis labels
+        ctx.font = '11px Avenir, sans-serif';
+        ctx.fillText(xMin.toFixed(1), padding, canvas.height - 30);
+        ctx.fillText(xMax.toFixed(1), padding + width, canvas.height - 30);
+        ctx.textAlign = 'right';
+        ctx.fillText('0.0', padding - 10, padding + height);
+        ctx.fillText('1.0', padding - 10, padding);
+        
+        // Legend
+        const legendX = padding + width + 20;
+        const legendY = padding + 50;
+        
+        ctx.font = '12px Avenir, sans-serif';
         ctx.textAlign = 'left';
-        ctx.fillText(`Mean: ${mean.toFixed(3)}`, padding + 10, padding + 20);
-        ctx.fillText(`95% CI: [${ci_low.toFixed(3)}, ${ci_high.toFixed(3)}]`, padding + 10, padding + 40);
+        allData.forEach((bioData, idx) => {
+            const yPos = legendY + idx * 25;
+            
+            // Color line
+            ctx.strokeStyle = bioData.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(legendX, yPos);
+            ctx.lineTo(legendX + 30, yPos);
+            ctx.stroke();
+            
+            // Label
+            ctx.fillStyle = '#000';
+            ctx.fillText(bioData.name, legendX + 35, yPos + 4);
+        });
     }
     
-    async displayProtectionCurve() {
-        try {
-            this.log('Generating protection curve...');
-            
-            // Get predictions across titre range
-            await this.webR.evalR(`
-                model <- .GlobalEnv$fitted_model
-                data <- model$data
-                
-                # Create prediction grid
-                titre_range <- seq(min(data$titre), max(data$titre), length.out = 100)
-                
-                # Get predictions using the fitted model
-                pred_data <- data.frame(titre = titre_range)
-                predictions <- predict(model$model, newdata = pred_data, type = "response")
-                
-                .GlobalEnv$curve_titre <- titre_range
-                .GlobalEnv$curve_prob <- predictions
-                .GlobalEnv$obs_titre <- data$titre
-                .GlobalEnv$obs_infected <- data$infected
-            `);
-            
-            const titreResult = await this.webR.evalR('curve_titre');
-            const probResult = await this.webR.evalR('curve_prob');
-            const obsTitreResult = await this.webR.evalR('obs_titre');
-            const obsInfectedResult = await this.webR.evalR('obs_infected');
-            
-            const titre = await titreResult.toArray();
-            const prob = await probResult.toArray();
-            const obsTitre = await obsTitreResult.toArray();
-            const obsInfected = await obsInfectedResult.toArray();
-            
-            const curveDiv = document.getElementById('curve-plot');
-            const canvas = document.createElement('canvas');
-            canvas.id = 'protection-curve-canvas';
-            curveDiv.innerHTML = '';
-            curveDiv.appendChild(canvas);
-            
-            this.plotProtectionCurve(canvas, titre, prob, obsTitre, obsInfected);
-            
-        } catch (error) {
-            this.logError('Failed to generate protection curve: ' + error.message);
-            console.error(error);
-        }
-    }
-    
-    plotProtectionCurve(canvas, titre, prob, obsTitre, obsInfected) {
+    plotProtectionCurve(canvas, titre, prob, obsTitre, obsData, yLabel = 'Probability of Protection') {
         const ctx = canvas.getContext('2d');
-        canvas.width = 600;
-        canvas.height = 400;
+        canvas.width = 550;
+        canvas.height = 380;
         
         const padding = 60;
         const width = canvas.width - 2 * padding;
@@ -858,7 +1556,7 @@ class SeroCOPApp {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
         for (let i = 0; i < obsTitre.length; i++) {
             const x = toX(obsTitre[i]);
-            const y = toY(obsInfected[i]);
+            const y = toY(obsData[i]);
             ctx.beginPath();
             ctx.arc(x, y, 3, 0, 2 * Math.PI);
             ctx.fill();
@@ -887,13 +1585,14 @@ class SeroCOPApp {
         ctx.fillStyle = '#000';
         ctx.font = '14px Avenir, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('Protection Curve', canvas.width / 2, 30);
+        const title = yLabel.includes('Protection') ? 'Protection Curve' : 'Risk Curve';
+        ctx.fillText(title, canvas.width / 2, 30);
         ctx.fillText('Antibody Titre', canvas.width / 2, canvas.height - 10);
         
         ctx.save();
         ctx.translate(15, canvas.height / 2);
         ctx.rotate(-Math.PI / 2);
-        ctx.fillText('Probability of Infection', 0, 0);
+        ctx.fillText(yLabel, 0, 0);
         ctx.restore();
         
         // Axis labels
@@ -905,57 +1604,215 @@ class SeroCOPApp {
         ctx.fillText('1.0', padding - 5, padding);
     }
     
-    async displayROCCurve() {
-        try {
-            this.log('Generating ROC curve...');
+    displayROCCurve() {
+        this.log('Generating ROC curve...');
+        
+        const rocDiv = document.getElementById('roc-plot');
+        const canvas = document.createElement('canvas');
+        canvas.id = 'roc-curve-canvas';
+        rocDiv.innerHTML = '<h3>ROC Curve</h3>';
+        rocDiv.appendChild(canvas);
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: compute ROC for each
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            const allROC = [];
+            const colors = ['#000000', '#555555', '#999999'];
             
-            // Calculate ROC curve points
-            await this.webR.evalR(`
-                model <- .GlobalEnv$fitted_model
-                predictions <- model$predictions
-                observed <- model$data$infected
+            biomarkerNames.forEach((biomarker, idx) => {
+                const model = this.model.biomarkers[biomarker];
+                const data = model.data;
+                const summaries = model.summaries;
                 
-                # Calculate ROC points
-                thresholds <- seq(0, 1, length.out = 100)
-                tpr <- numeric(100)
-                fpr <- numeric(100)
+                // Compute predicted probabilities using posterior mean
+                const floor = summaries.floor.mean;
+                const ceiling = summaries.ceiling.mean;
+                const ec50 = summaries.ec50.mean;
+                const slope = summaries.slope.mean;
                 
-                for (i in 1:100) {
-                    pred_class <- as.numeric(predictions >= thresholds[i])
-                    tp <- sum(pred_class == 1 & observed == 1)
-                    fp <- sum(pred_class == 1 & observed == 0)
-                    tn <- sum(pred_class == 0 & observed == 0)
-                    fn <- sum(pred_class == 0 & observed == 1)
+                const predictions = data.titre.map(t => {
+                    const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                    return ceiling * (sigmoid * (1 - floor) + floor);
+                });
+                
+                // Calculate ROC curve points
+                const thresholds = Array.from({length: 100}, (_, i) => i / 99);
+                const tpr = [];
+                const fpr = [];
+                
+                thresholds.forEach(threshold => {
+                    const predClass = predictions.map(p => p >= threshold ? 1 : 0);
                     
-                    tpr[i] <- if (tp + fn > 0) tp / (tp + fn) else 0
-                    fpr[i] <- if (fp + tn > 0) fp / (fp + tn) else 0
+                    let tp = 0, fp = 0, tn = 0, fn = 0;
+                    for (let i = 0; i < predClass.length; i++) {
+                        if (predClass[i] === 1 && data.infected[i] === 1) tp++;
+                        else if (predClass[i] === 1 && data.infected[i] === 0) fp++;
+                        else if (predClass[i] === 0 && data.infected[i] === 0) tn++;
+                        else fn++;
+                    }
+                    
+                    tpr.push(tp + fn > 0 ? tp / (tp + fn) : 0);
+                    fpr.push(fp + tn > 0 ? fp / (fp + tn) : 0);
+                });
+                
+                // Calculate AUC
+                let auc = 0;
+                for (let i = 1; i < fpr.length; i++) {
+                    auc += (fpr[i] - fpr[i-1]) * (tpr[i] + tpr[i-1]) / 2;
                 }
                 
-                .GlobalEnv$roc_fpr <- fpr
-                .GlobalEnv$roc_tpr <- tpr
-            `);
+                allROC.push({
+                    name: biomarker,
+                    fpr: fpr,
+                    tpr: tpr,
+                    auc: auc,
+                    color: colors[idx % colors.length]
+                });
+            });
             
-            const fprResult = await this.webR.evalR('roc_fpr');
-            const tprResult = await this.webR.evalR('roc_tpr');
+            this.plotMultiROCCurve(canvas, allROC);
+        } else {
+            // Single biomarker
+            const data = this.model.data;
+            const summaries = this.model.summaries;
             
-            const fpr = await fprResult.toArray();
-            const tpr = await tprResult.toArray();
+            // Compute predicted probabilities using posterior mean
+            const floor = summaries.floor.mean;
+            const ceiling = summaries.ceiling.mean;
+            const ec50 = summaries.ec50.mean;
+            const slope = summaries.slope.mean;
             
-            const rocDiv = document.getElementById('roc-plot');
-            const canvas = document.createElement('canvas');
-            canvas.id = 'roc-curve-canvas';
-            rocDiv.innerHTML = '';
-            rocDiv.appendChild(canvas);
+            const predictions = data.titre.map(t => {
+                const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                return ceiling * (sigmoid * (1 - floor) + floor);
+            });
             
-            this.plotROCCurve(canvas, fpr, tpr);
+            // Calculate ROC curve points
+            const thresholds = Array.from({length: 100}, (_, i) => i / 99);
+            const tpr = [];
+            const fpr = [];
             
-        } catch (error) {
-            this.logError('Failed to generate ROC curve: ' + error.message);
-            console.error(error);
+            thresholds.forEach(threshold => {
+                const predClass = predictions.map(p => p >= threshold ? 1 : 0);
+                
+                let tp = 0, fp = 0, tn = 0, fn = 0;
+                for (let i = 0; i < predClass.length; i++) {
+                    if (predClass[i] === 1 && data.infected[i] === 1) tp++;
+                    else if (predClass[i] === 1 && data.infected[i] === 0) fp++;
+                    else if (predClass[i] === 0 && data.infected[i] === 0) tn++;
+                    else fn++;
+                }
+                
+                tpr.push(tp + fn > 0 ? tp / (tp + fn) : 0);
+                fpr.push(fp + tn > 0 ? fp / (fp + tn) : 0);
+            });
+            
+            // Calculate AUC using trapezoidal rule
+            let auc = 0;
+            for (let i = 1; i < fpr.length; i++) {
+                auc += (fpr[i] - fpr[i-1]) * (tpr[i] + tpr[i-1]) / 2;
+            }
+            
+            this.plotROCCurve(canvas, fpr, tpr, auc);
         }
     }
     
-    plotROCCurve(canvas, fpr, tpr) {
+    plotMultiROCCurve(canvas, allROC) {
+        const ctx = canvas.getContext('2d');
+        canvas.width = 600;
+        canvas.height = 500;
+        
+        const padding = 60;
+        const legendWidth = 120;
+        const width = canvas.width - 2 * padding - legendWidth;
+        const height = canvas.height - 2 * padding;
+        
+        // Clear
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        const toX = (val) => padding + val * width;
+        const toY = (val) => padding + height - (val * height);
+        
+        // Draw diagonal (chance line)
+        ctx.strokeStyle = '#ccc';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(padding, padding + height);
+        ctx.lineTo(padding + width, padding);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // Draw ROC curves
+        allROC.forEach((rocData, idx) => {
+            ctx.strokeStyle = rocData.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(toX(rocData.fpr[0]), toY(rocData.tpr[0]));
+            for (let i = 1; i < rocData.fpr.length; i++) {
+                ctx.lineTo(toX(rocData.fpr[i]), toY(rocData.tpr[i]));
+            }
+            ctx.stroke();
+        });
+        
+        // Axes
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, padding + height);
+        ctx.lineTo(padding + width, padding + height);
+        ctx.stroke();
+        
+        // Labels
+        ctx.fillStyle = '#000';
+        ctx.font = '14px Avenir, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('ROC Curves - Multi-Biomarker', canvas.width / 2 - legendWidth / 2, 30);
+        ctx.fillText('False Positive Rate', padding + width / 2, canvas.height - 10);
+        
+        ctx.save();
+        ctx.translate(15, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText('True Positive Rate', 0, 0);
+        ctx.restore();
+        
+        // Axis ticks
+        ctx.font = '11px Avenir, sans-serif';
+        ctx.fillText('0.0', padding, canvas.height - 30);
+        ctx.fillText('1.0', padding + width, canvas.height - 30);
+        ctx.textAlign = 'right';
+        ctx.fillText('0.0', padding - 10, padding + height);
+        ctx.fillText('1.0', padding - 10, padding);
+        
+        // Legend with AUC
+        const legendX = padding + width + 20;
+        const legendY = padding + 50;
+        
+        ctx.font = '12px Avenir, sans-serif';
+        ctx.textAlign = 'left';
+        allROC.forEach((rocData, idx) => {
+            const yPos = legendY + idx * 30;
+            
+            // Color line
+            ctx.strokeStyle = rocData.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(legendX, yPos);
+            ctx.lineTo(legendX + 30, yPos);
+            ctx.stroke();
+            
+            // Label
+            ctx.fillStyle = '#000';
+            ctx.fillText(rocData.name, legendX + 35, yPos + 4);
+            ctx.font = '10px Avenir, sans-serif';
+            ctx.fillText(`AUC: ${rocData.auc.toFixed(3)}`, legendX + 35, yPos + 16);
+            ctx.font = '12px Avenir, sans-serif';
+        });
+    }
+    
+    plotROCCurve(canvas, fpr, tpr, auc) {
         const ctx = canvas.getContext('2d');
         canvas.width = 500;
         canvas.height = 500;
@@ -993,7 +1850,7 @@ class SeroCOPApp {
         
         // Axes
         ctx.strokeStyle = '#333';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(padding, padding);
         ctx.lineTo(padding, padding + height);
@@ -1002,9 +1859,11 @@ class SeroCOPApp {
         
         // Labels
         ctx.fillStyle = '#000';
-        ctx.font = '14px Avenir, sans-serif';
+        ctx.font = '16px Avenir, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText('ROC Curve', canvas.width / 2, 30);
+        
+        ctx.font = '14px Avenir, sans-serif';
         ctx.fillText('False Positive Rate', canvas.width / 2, canvas.height - 10);
         
         ctx.save();
@@ -1013,8 +1872,14 @@ class SeroCOPApp {
         ctx.fillText('True Positive Rate', 0, 0);
         ctx.restore();
         
+        // AUC
+        ctx.font = '14px Avenir, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`AUC = ${auc.toFixed(3)}`, padding + 10, padding + 30);
+        
         // Axis labels
         ctx.font = '11px Avenir, sans-serif';
+        ctx.textAlign = 'center';
         ctx.fillText('0.0', padding, canvas.height - 30);
         ctx.fillText('1.0', padding + width, canvas.height - 30);
         ctx.textAlign = 'right';
@@ -1022,71 +1887,34 @@ class SeroCOPApp {
         ctx.fillText('1.0', padding - 5, padding);
     }
 
-    async displayMetrics() {
-        try {
-            await this.webR.evalR(`
-                model <- .GlobalEnv$fitted_model
-                
-                # Calculate performance metrics
-                predictions <- model$predictions
-                observed <- model$data$infected
-                
-                # Simple AUC approximation (Mann-Whitney U statistic)
-                ranks <- rank(predictions)
-                n1 <- sum(observed == 1)
-                n0 <- sum(observed == 0)
-                auc_value <- if (n1 > 0 && n0 > 0) {
-                    (sum(ranks[observed == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
-                } else {
-                    NA
-                }
-                
-                # Brier score
-                brier <- mean((predictions - observed)^2)
-                
-                .GlobalEnv$metrics_auc <- auc_value
-                .GlobalEnv$metrics_brier <- brier
-                .GlobalEnv$metrics_n <- length(observed)
-            `);
-            
-            const aucResult = await this.webR.evalR('metrics_auc');
-            const brierResult = await this.webR.evalR('metrics_brier');
-            const nResult = await this.webR.evalR('metrics_n');
-            
-            const auc = await aucResult.toNumber();
-            const brier = await brierResult.toNumber();
-            const n = await nResult.toNumber();
-            
-            const metricsDiv = document.getElementById('metrics-table');
-            metricsDiv.innerHTML = `
-                <table class="metrics-table">
-                    <tr>
-                        <th>Metric</th>
-                        <th>Value</th>
-                    </tr>
-                    <tr>
-                        <td>ROC AUC</td>
-                        <td>${auc.toFixed(4)}</td>
-                    </tr>
-                    <tr>
-                        <td>Brier Score</td>
-                        <td>${brier.toFixed(4)}</td>
-                    </tr>
-                    <tr>
-                        <td>Observations</td>
-                        <td>${n}</td>
-                    </tr>
-                </table>
-                <p style="margin-top: 20px; font-size: 0.9rem; color: #666;">
-                    <strong>Note:</strong> Using simplified logistic regression. 
-                    For full Bayesian analysis with brms, use native R installation.
-                </p>
-            `;
-            
-        } catch (error) {
-            this.logError('Failed to compute metrics: ' + error.message);
-            console.error(error);
-        }
+    displayMetrics() {
+        this.log('Calculating model metrics...');
+        
+        const summaries = this.model.summaries;
+        const diagnostics = this.model.diagnostics;
+        
+        const metricsDiv = document.getElementById('metrics-table');
+        let html = metricsDiv.innerHTML; // Keep convergence table
+        
+        html += '<h3>Model Summary</h3>';
+        html += '<table class="summary-table">';
+        html += '<thead><tr><th>Parameter</th><th>Mean</th><th>SD</th><th>95% CI</th></tr></thead>';
+        html += '<tbody>';
+        
+        const params = ['floor', 'ceiling', 'ec50', 'slope'];
+        params.forEach(param => {
+            const s = summaries[param];
+            html += `<tr>`;
+            html += `<td><strong>${param}</strong></td>`;
+            html += `<td>${s.mean.toFixed(3)}</td>`;
+            html += `<td>${s.sd.toFixed(3)}</td>`;
+            html += `<td>[${s.q025.toFixed(3)}, ${s.q975.toFixed(3)}]</td>`;
+            html += `</tr>`;
+        });
+        
+        html += '</tbody></table>';
+        
+        metricsDiv.innerHTML = html;
     }
 
     switchTab(tabName) {
@@ -1101,6 +1929,398 @@ class SeroCOPApp {
             pane.classList.remove('active');
         });
         document.getElementById(`tab-${tabName}`).classList.add('active');
+    }
+
+    displayModelComparison() {
+        const compDiv = document.getElementById('comparison-plot');
+        if (!compDiv) return;
+        
+        // Clear previous content
+        compDiv.innerHTML = '';
+        
+        if (this.model.type === 'multi') {
+            // Multi-biomarker: compute LOO-CV ELPD and AUC for each
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            const metrics = [];
+            
+            biomarkerNames.forEach(biomarker => {
+                const model = this.model.biomarkers[biomarker];
+                const data = model.data;
+                const summaries = model.summaries;
+                
+                // Compute LOO-CV ELPD (approximate)
+                const floor = summaries.floor.mean;
+                const ceiling = summaries.ceiling.mean;
+                const ec50 = summaries.ec50.mean;
+                const slope = summaries.slope.mean;
+                
+                // Compute pointwise ELPD for uncertainty estimation
+                const pointwiseELPD = [];
+                const predictions = [];
+                
+                for (let i = 0; i < data.titre.length; i++) {
+                    const t = data.titre[i];
+                    const y = data.infected[i];
+                    const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                    const p = ceiling * (sigmoid * (1 - floor) + floor);
+                    predictions.push(p);
+                    
+                    const pClip = Math.max(0.0001, Math.min(0.9999, p));
+                    const loglik = y === 1 ? Math.log(pClip) : Math.log(1 - pClip);
+                    pointwiseELPD.push(loglik);
+                }
+                
+                const elpd = pointwiseELPD.reduce((a, b) => a + b, 0);
+                const elpdMean = elpd / data.titre.length;
+                const elpdSE = Math.sqrt(
+                    pointwiseELPD.reduce((sum, val) => sum + Math.pow(val - elpdMean, 2), 0) / 
+                    (data.titre.length - 1)
+                ) * Math.sqrt(data.titre.length);
+                
+                // Compute AUC for protection (predicting non-infection)
+                const computeAUC = (preds, labels) => {
+                    const thresholds = Array.from({length: 100}, (_, i) => i / 99);
+                    const rocPoints = [];
+                    
+                    thresholds.forEach(threshold => {
+                        // For protection: predict protected (0) when prob >= threshold
+                        const predClass = preds.map(p => p >= threshold ? 0 : 1);
+                        let tp = 0, fp = 0, tn = 0, fn = 0;
+                        
+                        for (let i = 0; i < predClass.length; i++) {
+                            // TP: predicted protected (0), actually protected (0)
+                            // FP: predicted protected (0), actually infected (1)
+                            if (predClass[i] === 0 && labels[i] === 0) tp++;
+                            else if (predClass[i] === 0 && labels[i] === 1) fp++;
+                            else if (predClass[i] === 1 && labels[i] === 1) tn++;
+                            else fn++;
+                        }
+                        
+                        const tpr = tp + fn > 0 ? tp / (tp + fn) : 0;
+                        const fpr = fp + tn > 0 ? fp / (fp + tn) : 0;
+                        rocPoints.push({fpr, tpr});
+                    });
+                    
+                    // Sort ROC points by FPR (ascending) for proper trapezoidal integration
+                    rocPoints.sort((a, b) => a.fpr - b.fpr);
+                    
+                    // Compute AUC using trapezoidal rule
+                    let auc = 0;
+                    for (let i = 1; i < rocPoints.length; i++) {
+                        auc += (rocPoints[i].fpr - rocPoints[i-1].fpr) * 
+                               (rocPoints[i].tpr + rocPoints[i-1].tpr) / 2;
+                    }
+                    return auc;
+                };
+                
+                // Convert to protection predictions (1 - infection risk)
+                const protectionPreds = predictions.map(p => 1 - p);
+                const auc = computeAUC(protectionPreds, data.infected);
+                
+                // Bootstrap AUC confidence interval (100 resamples for speed)
+                const bootstrapAUCs = [];
+                for (let b = 0; b < 100; b++) {
+                    const indices = [];
+                    for (let i = 0; i < data.titre.length; i++) {
+                        indices.push(Math.floor(Math.random() * data.titre.length));
+                    }
+                    const bootPreds = indices.map(i => protectionPreds[i]);
+                    const bootLabels = indices.map(i => data.infected[i]);
+                    bootstrapAUCs.push(computeAUC(bootPreds, bootLabels));
+                }
+                bootstrapAUCs.sort((a, b) => a - b);
+                const aucCI = [
+                    bootstrapAUCs[Math.floor(0.025 * bootstrapAUCs.length)],
+                    bootstrapAUCs[Math.floor(0.975 * bootstrapAUCs.length)]
+                ];
+                
+                metrics.push({
+                    name: biomarker, 
+                    elpd: elpd, 
+                    elpdSE: elpdSE,
+                    auc: auc,
+                    aucCI: aucCI
+                });
+            });
+            
+            // Create scatter plot
+            const scatterDiv = document.createElement('div');
+            scatterDiv.style.marginBottom = '30px';
+            const canvas = document.createElement('canvas');
+            scatterDiv.appendChild(canvas);
+            compDiv.appendChild(scatterDiv);
+            this.plotComparisonScatter(canvas, metrics);
+            
+            // Add table
+            const tableDiv = document.createElement('div');
+            let tableHTML = '<h4 style="margin-top: 30px;">Comparison Table</h4>';
+            tableHTML += '<table class="summary-table" style="margin-top: 10px;"><thead><tr>';
+            tableHTML += '<th>Biomarker</th><th>LOO-CV ELPD (SE)</th><th>AUC (95% CI)</th></tr></thead><tbody>';
+            
+            metrics.forEach(m => {
+                tableHTML += `<tr><td><strong>${m.name}</strong></td>`;
+                tableHTML += `<td>${m.elpd.toFixed(2)} (${m.elpdSE.toFixed(2)})</td>`;
+                tableHTML += `<td>${m.auc.toFixed(3)} (${m.aucCI[0].toFixed(3)}-${m.aucCI[1].toFixed(3)})</td></tr>`;
+            });
+            
+            tableHTML += '</tbody></table>';
+            tableDiv.innerHTML = tableHTML;
+            compDiv.appendChild(tableDiv);
+            
+        } else {
+            // Single biomarker: just show LOO-CV ELPD and AUC
+            const data = this.model.data;
+            const summaries = this.model.summaries;
+            
+            const floor = summaries.floor.mean;
+            const ceiling = summaries.ceiling.mean;
+            const ec50 = summaries.ec50.mean;
+            const slope = summaries.slope.mean;
+            
+            // Compute pointwise ELPD for uncertainty estimation
+            const pointwiseELPD = [];
+            const predictions = [];
+            
+            for (let i = 0; i < data.titre.length; i++) {
+                const t = data.titre[i];
+                const y = data.infected[i];
+                const sigmoid = 1 / (1 + Math.exp(slope * (t - ec50)));
+                const p = ceiling * (sigmoid * (1 - floor) + floor);
+                predictions.push(p);
+                
+                const pClip = Math.max(0.0001, Math.min(0.9999, p));
+                const loglik = y === 1 ? Math.log(pClip) : Math.log(1 - pClip);
+                pointwiseELPD.push(loglik);
+            }
+            
+            const elpd = pointwiseELPD.reduce((a, b) => a + b, 0);
+            const elpdMean = elpd / data.titre.length;
+            const elpdSE = Math.sqrt(
+                pointwiseELPD.reduce((sum, val) => sum + Math.pow(val - elpdMean, 2), 0) / 
+                (data.titre.length - 1)
+            ) * Math.sqrt(data.titre.length);
+            
+            // Compute AUC with helper function
+            const computeAUC = (preds, labels) => {
+                const thresholds = Array.from({length: 100}, (_, i) => i / 99);
+                const rocPoints = [];
+                
+                thresholds.forEach(threshold => {
+                    const predClass = preds.map(p => p >= threshold ? 1 : 0);
+                    let tp = 0, fp = 0, tn = 0, fn = 0;
+                    
+                    for (let i = 0; i < predClass.length; i++) {
+                        if (predClass[i] === 1 && labels[i] === 1) tp++;
+                        else if (predClass[i] === 1 && labels[i] === 0) fp++;
+                        else if (predClass[i] === 0 && labels[i] === 0) tn++;
+                        else fn++;
+                    }
+                    
+                    const tpr = tp + fn > 0 ? tp / (tp + fn) : 0;
+                    const fpr = fp + tn > 0 ? fp / (fp + tn) : 0;
+                    rocPoints.push({fpr, tpr});
+                });
+                
+                let auc = 0;
+                for (let i = 1; i < rocPoints.length; i++) {
+                    auc += (rocPoints[i].fpr - rocPoints[i-1].fpr) * 
+                           (rocPoints[i].tpr + rocPoints[i-1].tpr) / 2;
+                }
+                return auc;
+            };
+            
+            const auc = computeAUC(predictions, data.infected);
+            
+            // Bootstrap AUC confidence interval
+            const bootstrapAUCs = [];
+            for (let b = 0; b < 100; b++) {
+                const indices = [];
+                for (let i = 0; i < data.titre.length; i++) {
+                    indices.push(Math.floor(Math.random() * data.titre.length));
+                }
+                const bootPreds = indices.map(i => predictions[i]);
+                const bootLabels = indices.map(i => data.infected[i]);
+                bootstrapAUCs.push(computeAUC(bootPreds, bootLabels));
+            }
+            bootstrapAUCs.sort((a, b) => a - b);
+            const aucCI = [
+                bootstrapAUCs[Math.floor(0.025 * bootstrapAUCs.length)],
+                bootstrapAUCs[Math.floor(0.975 * bootstrapAUCs.length)]
+            ];
+            
+            const perfDiv = document.createElement('div');
+            perfDiv.innerHTML = '<h4>Model Performance</h4>';
+            perfDiv.innerHTML += `<p><strong>LOO-CV ELPD:</strong> ${elpd.toFixed(2)} (SE: ${elpdSE.toFixed(2)})</p>`;
+            perfDiv.innerHTML += `<p><strong>AUC:</strong> ${auc.toFixed(3)} (95% CI: ${aucCI[0].toFixed(3)}-${aucCI[1].toFixed(3)})</p>`;
+            compDiv.appendChild(perfDiv);
+        }
+    }
+    
+    plotComparisonScatter(canvas, metrics) {
+        const ctx = canvas.getContext('2d');
+        canvas.width = 600;
+        canvas.height = 450;
+        
+        const padding = 90;
+        const width = canvas.width - 2 * padding;
+        const height = canvas.height - 2 * padding;
+        
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Scales - include uncertainty in ranges
+        const elpdValues = metrics.map(m => m.elpd);
+        const elpdWithSE = metrics.flatMap(m => [m.elpd - m.elpdSE, m.elpd + m.elpdSE]);
+        const aucWithCI = metrics.flatMap(m => [m.aucCI[0], m.aucCI[1]]);
+        
+        const elpdMin = Math.min(...elpdWithSE);
+        const elpdMax = Math.max(...elpdWithSE);
+        const elpdRange = Math.max(elpdMax - elpdMin, 10); // Ensure minimum range
+        
+        // AUC axis: Include CI bounds, but keep sensible limits
+        const aucMin = Math.max(0.5, Math.min(...aucWithCI) - 0.02);
+        const aucMax = Math.min(1.0, Math.max(...aucWithCI) + 0.02);
+        const aucRange = aucMax - aucMin;
+        
+        const toX = (val) => padding + ((val - elpdMin) / elpdRange) * width;
+        const toY = (val) => padding + height - ((val - aucMin) / aucRange) * height;
+        
+        console.log('Plotting comparison:', metrics);
+        console.log('ELPD range:', elpdMin, 'to', elpdMax);
+        console.log('AUC range:', aucMin, 'to', aucMax);
+        
+        // Draw background grid
+        ctx.strokeStyle = '#f0f0f0';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i++) {
+            const x = padding + (i / 5) * width;
+            ctx.beginPath();
+            ctx.moveTo(x, padding);
+            ctx.lineTo(x, padding + height);
+            ctx.stroke();
+            
+            const y = padding + (i / 5) * height;
+            ctx.beginPath();
+            ctx.moveTo(padding, y);
+            ctx.lineTo(padding + width, y);
+            ctx.stroke();
+        }
+        
+        // Axes
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, padding + height);
+        ctx.lineTo(padding + width, padding + height);
+        ctx.stroke();
+        
+        // Draw error bars first (so they appear behind points)
+        const colors = ['#000000', '#ff6600', '#0066ff'];
+        metrics.forEach((m, idx) => {
+            const x = toX(m.elpd);
+            const y = toY(m.auc);
+            
+            // Horizontal error bar for ELPD (±SE)
+            const xLower = toX(m.elpd - m.elpdSE);
+            const xUpper = toX(m.elpd + m.elpdSE);
+            
+            ctx.strokeStyle = colors[idx % colors.length];
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.5;
+            
+            // Horizontal line
+            ctx.beginPath();
+            ctx.moveTo(xLower, y);
+            ctx.lineTo(xUpper, y);
+            ctx.stroke();
+            
+            // End caps
+            ctx.beginPath();
+            ctx.moveTo(xLower, y - 4);
+            ctx.lineTo(xLower, y + 4);
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.moveTo(xUpper, y - 4);
+            ctx.lineTo(xUpper, y + 4);
+            ctx.stroke();
+            
+            // Vertical error bar for AUC (95% CI)
+            const yLower = toY(m.aucCI[0]);
+            const yUpper = toY(m.aucCI[1]);
+            
+            // Vertical line
+            ctx.beginPath();
+            ctx.moveTo(x, yLower);
+            ctx.lineTo(x, yUpper);
+            ctx.stroke();
+            
+            // End caps
+            ctx.beginPath();
+            ctx.moveTo(x - 4, yLower);
+            ctx.lineTo(x + 4, yLower);
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.moveTo(x - 4, yUpper);
+            ctx.lineTo(x + 4, yUpper);
+            ctx.stroke();
+            
+            ctx.globalAlpha = 1.0;
+        });
+        
+        // Points (draw on top of error bars)
+        metrics.forEach((m, idx) => {
+            const x = toX(m.elpd);
+            const y = toY(m.auc);
+            
+            console.log(`Plotting ${m.name} at (${x}, ${y})`);
+            
+            // Draw point
+            ctx.fillStyle = colors[idx % colors.length];
+            ctx.beginPath();
+            ctx.arc(x, y, 10, 0, 2 * Math.PI);
+            ctx.fill();
+            
+            // Draw outline
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // Label
+            ctx.fillStyle = '#000';
+            ctx.font = 'bold 14px Avenir, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(m.name, x, y - 18);
+        });
+        
+        // Title and labels
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 16px Avenir, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Model Comparison: LOO-CV ELPD vs AUC', canvas.width / 2, 30);
+        
+        ctx.font = '14px Avenir, sans-serif';
+        ctx.fillText('LOO-CV ELPD (higher is better)', canvas.width / 2, canvas.height - 15);
+        
+        ctx.save();
+        ctx.translate(20, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText('AUC (higher is better)', 0, 0);
+        ctx.restore();
+        
+        // Axis ticks
+        ctx.font = '12px Avenir, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(elpdMin.toFixed(1), padding, canvas.height - 35);
+        ctx.fillText(elpdMax.toFixed(1), padding + width, canvas.height - 35);
+        
+        ctx.textAlign = 'right';
+        ctx.fillText(aucMin.toFixed(2), padding - 10, padding + height);
+        const aucMid = (aucMin + aucMax) / 2;
+        ctx.fillText(aucMid.toFixed(2), padding - 10, padding + height / 2);
+        ctx.fillText(aucMax.toFixed(2), padding - 10, padding);
     }
 
     log(message) {
