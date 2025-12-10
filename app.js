@@ -1892,29 +1892,57 @@ class SeroCOPApp {
     displayMetrics() {
         this.log('Calculating model metrics...');
         
-        const summaries = this.model.summaries;
-        const diagnostics = this.model.diagnostics;
-        
         const metricsDiv = document.getElementById('metrics-table');
         let html = metricsDiv.innerHTML; // Keep convergence table
         
-        html += '<h3>Model Summary</h3>';
-        html += '<table class="summary-table">';
-        html += '<thead><tr><th>Parameter</th><th>Mean</th><th>SD</th><th>95% CI</th></tr></thead>';
-        html += '<tbody>';
-        
-        const params = ['floor', 'ceiling', 'ec50', 'slope'];
-        params.forEach(param => {
-            const s = summaries[param];
-            html += `<tr>`;
-            html += `<td><strong>${param}</strong></td>`;
-            html += `<td>${s.mean.toFixed(3)}</td>`;
-            html += `<td>${s.sd.toFixed(3)}</td>`;
-            html += `<td>[${s.q025.toFixed(3)}, ${s.q975.toFixed(3)}]</td>`;
-            html += `</tr>`;
-        });
-        
-        html += '</tbody></table>';
+        // Check if single or multi-biomarker model
+        if (this.model.type === 'multi') {
+            // For multi-biomarker, show summary for each biomarker
+            html += '<h3>Model Summaries by Biomarker</h3>';
+            const biomarkerNames = Object.keys(this.model.biomarkers);
+            
+            biomarkerNames.forEach(biomarker => {
+                const summaries = this.model.biomarkers[biomarker].summaries;
+                html += `<h4>${biomarker}</h4>`;
+                html += '<table class="summary-table">';
+                html += '<thead><tr><th>Parameter</th><th>Mean</th><th>SD</th><th>95% CI</th></tr></thead>';
+                html += '<tbody>';
+                
+                const params = ['floor', 'ceiling', 'ec50', 'slope'];
+                params.forEach(param => {
+                    const s = summaries[param];
+                    html += `<tr>`;
+                    html += `<td><strong>${param}</strong></td>`;
+                    html += `<td>${s.mean.toFixed(3)}</td>`;
+                    html += `<td>${s.sd.toFixed(3)}</td>`;
+                    html += `<td>[${s.q025.toFixed(3)}, ${s.q975.toFixed(3)}]</td>`;
+                    html += `</tr>`;
+                });
+                
+                html += '</tbody></table>';
+            });
+        } else {
+            // Single biomarker model
+            const summaries = this.model.summaries;
+            
+            html += '<h3>Model Summary</h3>';
+            html += '<table class="summary-table">';
+            html += '<thead><tr><th>Parameter</th><th>Mean</th><th>SD</th><th>95% CI</th></tr></thead>';
+            html += '<tbody>';
+            
+            const params = ['floor', 'ceiling', 'ec50', 'slope'];
+            params.forEach(param => {
+                const s = summaries[param];
+                html += `<tr>`;
+                html += `<td><strong>${param}</strong></td>`;
+                html += `<td>${s.mean.toFixed(3)}</td>`;
+                html += `<td>${s.sd.toFixed(3)}</td>`;
+                html += `<td>[${s.q025.toFixed(3)}, ${s.q975.toFixed(3)}]</td>`;
+                html += `</tr>`;
+            });
+            
+            html += '</tbody></table>';
+        }
         
         metricsDiv.innerHTML = html;
     }
