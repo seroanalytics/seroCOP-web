@@ -383,7 +383,9 @@ class SeroCOPApp {
 
     async fitModel() {
         const modelType = document.getElementById('model-type').value;
-        const useHierarchical = document.getElementById('hierarchical-check').checked;
+        // Hierarchical effects temporarily disabled
+        const hierarchicalCheckbox = document.getElementById('hierarchical-check');
+        const useHierarchical = hierarchicalCheckbox ? hierarchicalCheckbox.checked : false;
         const chains = parseInt(document.getElementById('chains').value);
         const iter = parseInt(document.getElementById('iter').value);
 
